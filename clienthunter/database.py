@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS leads (
     contact_email TEXT,
     phone TEXT,
     location TEXT,
+    address TEXT,
+    prospect_type TEXT NOT NULL DEFAULT 'website',
     status TEXT NOT NULL DEFAULT 'new',
     status_updated_at TEXT,
     notes TEXT,
@@ -65,6 +67,8 @@ OPTIONAL_COLUMNS: dict[str, str] = {
     "contact_email": "TEXT",
     "phone": "TEXT",
     "location": "TEXT",
+    "address": "TEXT",
+    "prospect_type": "TEXT NOT NULL DEFAULT 'website'",
     "status": "TEXT NOT NULL DEFAULT 'new'",
     "status_updated_at": "TEXT",
     "notes": "TEXT",
@@ -106,6 +110,7 @@ def init_db() -> None:
         conn.execute(LEADS_TABLE_SQL)
         ensure_columns(conn)
         normalize_existing_statuses(conn)
+        normalize_existing_prospect_types(conn)
         create_indexes(conn)
 
 
@@ -142,6 +147,18 @@ def normalize_existing_statuses(conn: sqlite3.Connection) -> None:
     )
 
 
+def normalize_existing_prospect_types(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE leads
+        SET prospect_type = CASE
+            WHEN website IS NULL OR TRIM(website) = '' THEN 'business'
+            ELSE COALESCE(NULLIF(TRIM(prospect_type), ''), 'website')
+        END
+        """
+    )
+
+
 def create_indexes(conn: Optional[sqlite3.Connection] = None) -> None:
     """Create helpful indexes for common lead lookup and sorting operations."""
     should_close = False
@@ -157,6 +174,7 @@ def create_indexes(conn: Optional[sqlite3.Connection] = None) -> None:
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_industry ON leads(industry)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_prospect_type ON leads(prospect_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_created_at ON leads(created_at)")
     finally:
         if should_close:
@@ -183,6 +201,7 @@ def save_lead(
     contact_email: Optional[str] = None,
     phone: Optional[str] = None,
     location: Optional[str] = None,
+    address: Optional[str] = None,
     status: Optional[str] = "new",
     notes: Optional[str] = None,
 ) -> int:
@@ -204,6 +223,8 @@ def save_lead(
                 contact_email,
                 phone,
                 location,
+                address,
+                prospect_type,
                 status,
                 status_updated_at,
                 notes,
@@ -228,7 +249,7 @@ def save_lead(
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 business_name,
@@ -240,6 +261,8 @@ def save_lead(
                 contact_email,
                 phone,
                 location,
+                address,
+                "website",
                 normalized_status,
                 now,
                 notes,
@@ -261,6 +284,101 @@ def save_lead(
                 audit.opportunity_score,
                 json.dumps(audit.issues, ensure_ascii=False),
                 json.dumps(audit.recommendations, ensure_ascii=False),
+                now,
+                now,
+            ),
+        )
+
+        return int(cursor.lastrowid)
+
+
+def save_prospect(
+    business_name: str,
+    industry: Optional[str] = None,
+    source: Optional[str] = None,
+    website: Optional[str] = None,
+    contact_name: Optional[str] = None,
+    contact_email: Optional[str] = None,
+    phone: Optional[str] = None,
+    location: Optional[str] = None,
+    address: Optional[str] = None,
+    status: Optional[str] = "new",
+    notes: Optional[str] = None,
+) -> int:
+    """Save a business prospect even when there is no website to audit yet."""
+    init_db()
+    now = datetime.now().isoformat(timespec="seconds")
+    normalized_status = normalize_status(status)
+    clean_website = (website or "").strip()
+    prospect_type = "website" if clean_website else "business"
+    opportunity_score = 65 if clean_website else 80
+
+    default_notes = []
+    if notes:
+        default_notes.append(notes)
+    if not clean_website:
+        default_notes.append("No website found yet. This may be a stronger website-design prospect.")
+    if phone:
+        default_notes.append(f"Phone available: {phone}")
+    if contact_email:
+        default_notes.append(f"Email available: {contact_email}")
+
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO leads (
+                business_name,
+                website,
+                final_url,
+                industry,
+                source,
+                contact_name,
+                contact_email,
+                phone,
+                location,
+                address,
+                prospect_type,
+                status,
+                status_updated_at,
+                notes,
+                status_code,
+                opportunity_score,
+                issues_json,
+                recommendations_json,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                business_name,
+                clean_website,
+                clean_website,
+                industry,
+                source,
+                contact_name,
+                contact_email,
+                phone,
+                location,
+                address,
+                prospect_type,
+                normalized_status,
+                now,
+                "\n".join(default_notes),
+                None,
+                opportunity_score,
+                json.dumps(
+                    ["No website found yet"] if not clean_website else ["Website discovered but not audited yet"],
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    [
+                        "Research the business contact details and pitch a new website or digital upgrade."
+                    ]
+                    if not clean_website
+                    else ["Audit the website before sending a final proposal."],
+                    ensure_ascii=False,
+                ),
                 now,
                 now,
             ),
