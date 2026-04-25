@@ -1,0 +1,6 @@
+beautifulsoup4==4.12.3
+requests==2.32.3
+rich==13.9.4
+typer==0.15.1
+python-dotenv==1.0.1
+Jinja2==3.1.5
