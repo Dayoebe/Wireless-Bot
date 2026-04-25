@@ -234,7 +234,8 @@ def render_discover_leads() -> None:
             return
         with st.spinner("Searching for candidate business websites..."):
             try:
-                candidates = LeadDiscovery().discover(
+                discovery = LeadDiscovery()
+                candidates = discovery.discover(
                     industry=industry,
                     location=location,
                     keywords=keywords,
@@ -244,27 +245,34 @@ def render_discover_leads() -> None:
                 st.error(f"Discovery failed: {exc}")
                 return
         st.session_state["discovered_candidates"] = [candidate.to_dict() for candidate in candidates]
+        st.session_state["discovery_debug"] = discovery.last_debug
 
     candidates = st.session_state.get("discovered_candidates", [])
 
     if not candidates:
-        st.info("No candidates yet. Search with an industry and location to begin.")
+        st.info("No candidate websites found yet. Try a broader search like `Hotel`, `Clinic`, `School`, or add a nearby city/state.")
+        debug_lines = st.session_state.get("discovery_debug", [])
+        if debug_lines:
+            with st.expander("Search diagnostics"):
+                for line in debug_lines:
+                    st.write(f"- {line}")
         return
 
     if st.button("Clear Previous Discovery Results", key="clear_discovery_results"):
         st.session_state.pop("discovered_candidates", None)
+        st.session_state.pop("discovery_debug", None)
         st.success("Previous discovery results cleared.")
         st.rerun()
 
     candidates_df = pd.DataFrame(candidates)
     st.write("### Candidate Websites")
     st.dataframe(
-        candidates_df[["business_name", "website", "industry", "location", "search_query", "snippet"]],
+        candidates_df[["business_name", "website", "industry", "location", "source", "search_query", "snippet"]],
         use_container_width=True,
         hide_index=True,
     )
 
-    st.caption("Review the candidates before saving. Search results can include false positives, so always verify important leads manually before outreach.")
+    st.caption("Review the candidates before saving. Search results can include false positives, directories, or irrelevant websites, so verify important leads before outreach.")
 
     if not st.button("Audit and Save These Candidates", type="primary", key="audit_save_discovered_candidates"):
         return
