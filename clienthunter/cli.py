@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from .auditor import WebsiteAuditor
+from .database import get_lead, init_db, list_leads, save_lead
+from .exporter import export_leads
+from .outreach import build_outreach
+
+app = typer.Typer(help="Wireless Bot: audit websites, score leads, and generate outreach.")
+console = Console()
+
+
+@app.command()
+def initdb():
+    """Create the local SQLite database."""
+    init_db()
+    console.print("[green]Database initialized successfully.[/green]")
+
+
+@app.command()
+def scan(
+    url: str,
+    business_name: Optional[str] = typer.Option(None, "--business-name", "-b"),
+    industry: Optional[str] = typer.Option(None, "--industry", "-i"),
+    source: Optional[str] = typer.Option(None, "--source", "-s"),
+    contact_email: Optional[str] = typer.Option(None, "--contact-email"),
+    phone: Optional[str] = typer.Option(None, "--phone"),
+    location: Optional[str] = typer.Option(None, "--location"),
+):
+    """Audit one website and save it as a lead."""
+    auditor = WebsiteAuditor()
+    audit = auditor.audit(url)
+
+    lead_id = save_lead(
+        audit,
+        business_name=business_name,
+        industry=industry,
+        source=source,
+        contact_email=contact_email,
+        phone=phone,
+        location=location,
+    )
+
+    show_audit(audit.to_dict(), lead_id)
+
+
+@app.command()
+def bulk(csv_file: Path):
+    """Bulk audit websites from a CSV file."""
+    if not csv_file.exists():
+        raise typer.BadParameter(f"CSV file not found: {csv_file}")
+
+    auditor = WebsiteAuditor()
+    total = 0
+
+    with csv_file.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file)
+
+        for row in reader:
+            website = row.get("website") or row.get("url")
+
+            if not website:
+                console.print("[yellow]Skipping row without website/url.[/yellow]")
+                continue
+
+            console.print(f"[cyan]Scanning[/cyan] {website}")
+            audit = auditor.audit(website)
+
+            lead_id = save_lead(
+                audit,
+                business_name=row.get("business_name"),
+                industry=row.get("industry"),
+                source=row.get("source"),
+                contact_email=row.get("contact_email"),
+                phone=row.get("phone"),
+                location=row.get("location"),
+            )
+
+            console.print(f"[green]Saved lead #{lead_id}[/green] | Score: {audit.opportunity_score}/100")
+            total += 1
+
+    console.print(f"[bold green]Done. Scanned {total} lead(s).[/bold green]")
+
+
+@app.command(name="leads")
+def leads(limit: int = typer.Option(20, "--limit", "-l")):
+    """Show recently saved leads."""
+    rows = list_leads(limit=limit)
+
+    table = Table(title="Wireless Bot Leads")
+    table.add_column("ID", justify="right")
+    table.add_column("Business")
+    table.add_column("Website")
+    table.add_column("Industry")
+    table.add_column("Score", justify="right")
+    table.add_column("Footer Year", justify="right")
+    table.add_column("Stale?", justify="center")
+    table.add_column("Created")
+
+    for row in rows:
+        table.add_row(
+            str(row["id"]),
+            row["business_name"] or "-",
+            row["website"],
+            row["industry"] or "-",
+            str(row["opportunity_score"] or 0),
+            str(row["footer_year"] or "-"),
+            "Yes" if row["stale_footer"] else "No",
+            row["created_at"],
+        )
+
+    console.print(table)
+
+
+@app.command()
+def pitch(lead_id: int):
+    """Generate email, WhatsApp message, and proposal for a saved lead."""
+    lead = get_lead(lead_id)
+
+    if not lead:
+        console.print(f"[red]Lead #{lead_id} not found.[/red]")
+        raise typer.Exit(code=1)
+
+    outreach = build_outreach(lead)
+
+    console.print(Panel(outreach["email"], title="Email Pitch", expand=False))
+    console.print(Panel(outreach["whatsapp"], title="WhatsApp Pitch", expand=False))
+    console.print(Panel(outreach["proposal"], title="Mini Proposal", expand=False))
+
+
+@app.command()
+def export():
+    """Export all leads to CSV."""
+    output_path = export_leads()
+    console.print(f"[green]Exported leads to:[/green] {output_path}")
+
+
+def show_audit(audit: dict, lead_id: int):
+    table = Table(title=f"Audit Result | Lead #{lead_id}")
+    table.add_column("Signal")
+    table.add_column("Value")
+
+    main_fields = [
+        "url",
+        "final_url",
+        "status_code",
+        "response_time_ms",
+        "page_size_kb",
+        "title",
+        "meta_description",
+        "detected_platform",
+        "footer_year",
+        "stale_footer",
+        "https_enabled",
+        "has_viewport",
+        "has_sitemap",
+        "has_robots",
+        "opportunity_score",
+    ]
+
+    for field in main_fields:
+        table.add_row(field, str(audit.get(field)))
+
+    console.print(table)
+
+    issues = audit.get("issues", [])
+    recommendations = audit.get("recommendations", [])
+
+    console.print(Panel("\n".join(f"- {item}" for item in issues) or "No major issues found.", title="Issues"))
+    console.print(Panel("\n".join(f"- {item}" for item in recommendations) or "No recommendations.", title="Recommendations"))
+    console.print(f"[bold cyan]Next:[/bold cyan] python -m clienthunter.cli pitch {lead_id}")
+
+
+if __name__ == "__main__":
+    app()
