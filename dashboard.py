@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import time
 from io import StringIO
 from typing import Any
 
@@ -63,6 +64,14 @@ CUSTOM_CSS = """
     }
 </style>
 """
+
+FUN_DISCOVERY_MESSAGES = [
+    "📡 Raising antenna... looking for businesses around your target location.",
+    "🧭 Checking local map signals first, because real clients live offline too.",
+    "🕵️ Filtering noisy results so you do not chase shadows.",
+    "💼 Hunting for prospects Wireless can turn into paying clients.",
+    "🚀 Almost there... preparing candidate leads and fallback searches.",
+]
 
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -241,15 +250,24 @@ def render_discover_leads() -> None:
         with col2:
             keywords = st.text_input("Extra keywords", placeholder="booking, appointment, services, contact...", key="discover_keywords")
             max_results = st.slider("Maximum candidates", 3, 25, 10, key="discover_max_results")
+            deep_search = st.toggle("Deep search", value=False, help="Slower, but checks extra search engines.", key="discover_deep_search")
         submitted = st.form_submit_button("Find Candidate Websites", type="primary")
 
     if submitted:
         if not industry.strip():
             st.error("Please enter an industry first.")
             return
-        with st.spinner("Searching for candidate business websites..."):
+
+        progress = st.progress(0)
+        message_box = st.empty()
+        for index, message in enumerate(FUN_DISCOVERY_MESSAGES[:-1], start=1):
+            message_box.info(message)
+            progress.progress(index / len(FUN_DISCOVERY_MESSAGES))
+            time.sleep(0.25)
+
+        with st.spinner("Wireless Bot is checking maps, search pages, and prospect signals..."):
             try:
-                discovery = LeadDiscovery()
+                discovery = LeadDiscovery(timeout=8, enable_deep_search=deep_search)
                 candidates = discovery.discover(
                     industry=industry,
                     location=location,
@@ -257,8 +275,17 @@ def render_discover_leads() -> None:
                     max_results=max_results,
                 )
             except Exception as exc:
+                progress.empty()
+                message_box.empty()
                 st.error(f"Discovery failed: {exc}")
                 return
+
+        progress.progress(1.0)
+        message_box.success(FUN_DISCOVERY_MESSAGES[-1])
+        time.sleep(0.2)
+        progress.empty()
+        message_box.empty()
+
         st.session_state["last_discovery_inputs"] = {
             "industry": industry,
             "location": location,
