@@ -33,3 +33,7 @@ jobs:
       - name: Check CLI help
         run: |
           python -m clienthunter.cli --help
+
+      - name: Check dashboard syntax
+        run: |
+          python -m py_compile dashboard.py
