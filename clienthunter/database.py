@@ -14,6 +14,7 @@ from .models import AuditResult
 load_dotenv()
 
 DB_PATH = os.getenv("CLIENTHUNTER_DB", "clienthunter.sqlite3")
+VALID_LEAD_STATUSES = ("new", "contacted", "replied", "won", "lost")
 
 
 LEADS_TABLE_SQL = """
@@ -28,6 +29,9 @@ CREATE TABLE IF NOT EXISTS leads (
     contact_email TEXT,
     phone TEXT,
     location TEXT,
+    status TEXT NOT NULL DEFAULT 'new',
+    status_updated_at TEXT,
+    notes TEXT,
     status_code INTEGER,
     response_time_ms INTEGER,
     page_size_kb REAL,
@@ -61,6 +65,9 @@ OPTIONAL_COLUMNS: dict[str, str] = {
     "contact_email": "TEXT",
     "phone": "TEXT",
     "location": "TEXT",
+    "status": "TEXT NOT NULL DEFAULT 'new'",
+    "status_updated_at": "TEXT",
+    "notes": "TEXT",
     "status_code": "INTEGER",
     "response_time_ms": "INTEGER",
     "page_size_kb": "REAL",
@@ -98,6 +105,7 @@ def init_db() -> None:
     with get_connection() as conn:
         conn.execute(LEADS_TABLE_SQL)
         ensure_columns(conn)
+        normalize_existing_statuses(conn)
         create_indexes(conn)
 
 
@@ -110,6 +118,28 @@ def ensure_columns(conn: sqlite3.Connection) -> None:
     for column_name, column_type in OPTIONAL_COLUMNS.items():
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE leads ADD COLUMN {column_name} {column_type}")
+
+
+def normalize_existing_statuses(conn: sqlite3.Connection) -> None:
+    """Keep old rows usable after status tracking is introduced."""
+    now = datetime.now().isoformat(timespec="seconds")
+    placeholders = ", ".join("?" for _ in VALID_LEAD_STATUSES)
+
+    conn.execute(
+        "UPDATE leads SET status = 'new' WHERE status IS NULL OR TRIM(status) = ''"
+    )
+    conn.execute(
+        f"UPDATE leads SET status = 'new' WHERE LOWER(status) NOT IN ({placeholders})",
+        VALID_LEAD_STATUSES,
+    )
+    conn.execute(
+        """
+        UPDATE leads
+        SET status_updated_at = COALESCE(status_updated_at, created_at, ?)
+        WHERE status_updated_at IS NULL OR TRIM(status_updated_at) = ''
+        """,
+        (now,),
+    )
 
 
 def create_indexes(conn: Optional[sqlite3.Connection] = None) -> None:
@@ -126,10 +156,22 @@ def create_indexes(conn: Optional[sqlite3.Connection] = None) -> None:
             "CREATE INDEX IF NOT EXISTS idx_leads_opportunity_score ON leads(opportunity_score)"
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_industry ON leads(industry)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_leads_created_at ON leads(created_at)")
     finally:
         if should_close:
             conn.close()
+
+
+def normalize_status(status: Optional[str]) -> str:
+    """Validate and normalize lead status values."""
+    normalized = (status or "new").strip().lower()
+
+    if normalized not in VALID_LEAD_STATUSES:
+        allowed = ", ".join(VALID_LEAD_STATUSES)
+        raise ValueError(f"Invalid lead status: {status!r}. Allowed statuses: {allowed}.")
+
+    return normalized
 
 
 def save_lead(
@@ -141,10 +183,13 @@ def save_lead(
     contact_email: Optional[str] = None,
     phone: Optional[str] = None,
     location: Optional[str] = None,
+    status: Optional[str] = "new",
+    notes: Optional[str] = None,
 ) -> int:
     """Persist one audited website as a prospecting lead."""
     init_db()
     now = datetime.now().isoformat(timespec="seconds")
+    normalized_status = normalize_status(status)
 
     with get_connection() as conn:
         cursor = conn.execute(
@@ -159,6 +204,9 @@ def save_lead(
                 contact_email,
                 phone,
                 location,
+                status,
+                status_updated_at,
+                notes,
                 status_code,
                 response_time_ms,
                 page_size_kb,
@@ -180,7 +228,7 @@ def save_lead(
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 business_name,
@@ -192,6 +240,9 @@ def save_lead(
                 contact_email,
                 phone,
                 location,
+                normalized_status,
+                now,
+                notes,
                 audit.status_code,
                 audit.response_time_ms,
                 audit.page_size_kb,
@@ -254,3 +305,41 @@ def all_leads() -> list[sqlite3.Row]:
             ORDER BY created_at DESC, id DESC
             """
         ).fetchall()
+
+
+def update_lead_status(
+    lead_id: int,
+    status: str,
+    notes: Optional[str] = None,
+) -> sqlite3.Row | None:
+    """Update a lead's pipeline status and optional notes."""
+    init_db()
+    normalized_status = normalize_status(status)
+    now = datetime.now().isoformat(timespec="seconds")
+
+    with get_connection() as conn:
+        existing = conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+
+        if existing is None:
+            return None
+
+        if notes is None:
+            conn.execute(
+                """
+                UPDATE leads
+                SET status = ?, status_updated_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (normalized_status, now, now, lead_id),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE leads
+                SET status = ?, status_updated_at = ?, notes = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (normalized_status, now, notes, now, lead_id),
+            )
+
+        return conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
