@@ -16,7 +16,7 @@ from clienthunter.database import (
     save_lead,
     update_lead_status,
 )
-from clienthunter.discovery import LeadDiscovery
+from clienthunter.discovery import LeadDiscovery, build_manual_search_links
 from clienthunter.outreach import build_outreach
 
 
@@ -214,6 +214,21 @@ def render_overview(leads: list[dict[str, Any]], filtered_df: pd.DataFrame) -> N
     )
 
 
+def render_manual_search_links(industry: str, location: str, keywords: str) -> None:
+    links = build_manual_search_links(industry, location, keywords)
+    if not links:
+        return
+
+    st.write("### One-click fallback searches")
+    st.caption("Automatic discovery can be blocked by search engines. These links open ready-made searches so you can still find businesses faster and paste any good website into Manual Scan.")
+
+    links_df = pd.DataFrame(links)
+    st.dataframe(links_df, use_container_width=True, hide_index=True)
+
+    for link in links[:6]:
+        st.markdown(f"- [{link['source']} — {link['query']}]({link['url']})")
+
+
 def render_discover_leads() -> None:
     st.subheader("Discover Leads Automatically")
     st.caption("Enter an industry and location. Wireless Bot will find likely business websites, then you can audit and save them as leads.")
@@ -244,23 +259,36 @@ def render_discover_leads() -> None:
             except Exception as exc:
                 st.error(f"Discovery failed: {exc}")
                 return
+        st.session_state["last_discovery_inputs"] = {
+            "industry": industry,
+            "location": location,
+            "keywords": keywords,
+        }
         st.session_state["discovered_candidates"] = [candidate.to_dict() for candidate in candidates]
         st.session_state["discovery_debug"] = discovery.last_debug
 
     candidates = st.session_state.get("discovered_candidates", [])
+    last_inputs = st.session_state.get("last_discovery_inputs", {})
 
     if not candidates:
         st.info("No candidate websites found yet. Try a broader search like `Hotel`, `Clinic`, `School`, or add a nearby city/state.")
         debug_lines = st.session_state.get("discovery_debug", [])
         if debug_lines:
-            with st.expander("Search diagnostics"):
+            with st.expander("Search diagnostics", expanded=True):
                 for line in debug_lines:
                     st.write(f"- {line}")
+        if last_inputs:
+            render_manual_search_links(
+                last_inputs.get("industry", ""),
+                last_inputs.get("location", ""),
+                last_inputs.get("keywords", ""),
+            )
         return
 
     if st.button("Clear Previous Discovery Results", key="clear_discovery_results"):
         st.session_state.pop("discovered_candidates", None)
         st.session_state.pop("discovery_debug", None)
+        st.session_state.pop("last_discovery_inputs", None)
         st.success("Previous discovery results cleared.")
         st.rerun()
 
