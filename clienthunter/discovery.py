@@ -13,7 +13,12 @@ from .utils import normalize_url, truncate
 
 DEFAULT_DISCOVERY_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 WirelessBot/0.1"
+    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 WirelessBot/0.2"
+)
+
+OVERPASS_ENDPOINTS = (
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
 )
 
 EXCLUDED_DOMAINS = (
@@ -97,8 +102,14 @@ class LeadCandidate:
 class LeadDiscovery:
     """Discover likely business websites from industry/location search terms."""
 
-    def __init__(self, timeout: int = 15, user_agent: str = DEFAULT_DISCOVERY_USER_AGENT):
+    def __init__(
+        self,
+        timeout: int = 8,
+        user_agent: str = DEFAULT_DISCOVERY_USER_AGENT,
+        enable_deep_search: bool = False,
+    ):
         self.timeout = timeout
+        self.enable_deep_search = enable_deep_search
         self.session = requests.Session()
         self.session.headers.update(
             {
@@ -125,24 +136,27 @@ class LeadDiscovery:
             raise ValueError("Industry is required for lead discovery.")
 
         candidates: list[LeadCandidate] = []
-        seen_domains: set[str] = set()
-        seen_names: set[str] = set()
+        seen_keys: set[str] = set()
 
         for candidate in self._discover_from_openstreetmap(industry, location, keywords):
-            key = normalized_domain(candidate.website) or candidate.business_name.lower()
-            if key in seen_domains or candidate.business_name.lower() in seen_names:
+            key = candidate_key(candidate)
+            if key in seen_keys:
                 continue
 
-            seen_domains.add(key)
-            seen_names.add(candidate.business_name.lower())
+            seen_keys.add(key)
             candidates.append(candidate)
 
             if len(candidates) >= max_results:
                 return candidates
 
         fallback_candidates: list[LeadCandidate] = []
+        search_queries = build_search_queries(industry, location, keywords)
 
-        for query in build_search_queries(industry, location, keywords):
+        # Fast mode checks fewer search queries and avoids slower engines.
+        if not self.enable_deep_search:
+            search_queries = search_queries[:3]
+
+        for query in search_queries:
             search_results = self._search_all(query)
             self.last_debug.append(f"{query}: {len(search_results)} raw result(s)")
 
@@ -152,7 +166,7 @@ class LeadDiscovery:
                     continue
 
                 domain = normalized_domain(website)
-                if not domain or domain in seen_domains:
+                if not domain:
                     continue
 
                 title = clean_text(result.get("title", ""))
@@ -169,8 +183,12 @@ class LeadDiscovery:
                     snippet=truncate(snippet, 240),
                 )
 
+                key = candidate_key(candidate)
+                if key in seen_keys:
+                    continue
+
                 if is_probably_business_website(website):
-                    seen_domains.add(domain)
+                    seen_keys.add(key)
                     candidates.append(candidate)
                     if len(candidates) >= max_results:
                         return candidates
@@ -181,12 +199,12 @@ class LeadDiscovery:
             return candidates[:max_results]
 
         deduped_fallbacks: list[LeadCandidate] = []
-        fallback_seen: set[str] = set()
         for candidate in fallback_candidates:
-            domain = normalized_domain(candidate.website)
-            if domain and domain not in fallback_seen:
-                fallback_seen.add(domain)
-                deduped_fallbacks.append(candidate)
+            key = candidate_key(candidate)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped_fallbacks.append(candidate)
             if len(deduped_fallbacks) >= max_results:
                 break
 
@@ -218,17 +236,8 @@ class LeadDiscovery:
             return []
 
         query = build_overpass_query(area_id, tags)
-
-        try:
-            response = self.session.post(
-                "https://overpass-api.de/api/interpreter",
-                data={"data": query},
-                timeout=self.timeout + 20,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except Exception as exc:
-            self.last_debug.append(f"OpenStreetMap Overpass lookup failed: {exc}")
+        payload = self._fetch_overpass(query)
+        if payload is None:
             return []
 
         elements = payload.get("elements", [])
@@ -254,7 +263,7 @@ class LeadDiscovery:
 
             snippet_parts = [part for part in [address, phone, email] if part]
             if not website:
-                snippet_parts.append("No website listed in OpenStreetMap; use research links before outreach.")
+                snippet_parts.append("No website listed in OpenStreetMap; research this prospect before outreach.")
 
             candidates.append(
                 LeadCandidate(
@@ -270,6 +279,21 @@ class LeadDiscovery:
             )
 
         return candidates
+
+    def _fetch_overpass(self, query: str) -> dict | None:
+        for endpoint in OVERPASS_ENDPOINTS:
+            try:
+                response = self.session.get(
+                    endpoint,
+                    params={"data": query},
+                    timeout=self.timeout + 12,
+                )
+                response.raise_for_status()
+                self.last_debug.append(f"OpenStreetMap Overpass source worked: {endpoint}")
+                return response.json()
+            except Exception as exc:
+                self.last_debug.append(f"OpenStreetMap Overpass source failed ({endpoint}): {exc}")
+        return None
 
     def _resolve_osm_area_id(self, location: str) -> int | None:
         query = f"{location}, Nigeria"
@@ -298,8 +322,14 @@ class LeadDiscovery:
 
     def _search_all(self, query: str) -> list[dict[str, str]]:
         results: list[dict[str, str]] = []
+        searchers = [self._search_bing]
 
-        for searcher in (self._search_duckduckgo_html, self._search_duckduckgo_lite, self._search_bing):
+        if self.enable_deep_search:
+            searchers.extend([self._search_duckduckgo_html, self._search_duckduckgo_lite])
+        else:
+            self.last_debug.append("Deep search disabled: skipping slower DuckDuckGo checks")
+
+        for searcher in searchers:
             try:
                 searcher_results = searcher(query)
                 self.last_debug.append(f"{searcher.__name__}: {len(searcher_results)} result(s)")
@@ -363,7 +393,6 @@ def build_search_queries(industry: str, location: str = "", keywords: str = "") 
 
 
 def build_manual_search_links(industry: str, location: str = "", keywords: str = "") -> list[dict[str, str]]:
-    """Build one-click search links when automatic scraping returns no candidates."""
     queries = build_search_queries(industry, location, keywords)[:5]
     links: list[dict[str, str]] = []
 
@@ -399,6 +428,10 @@ def build_business_research_query(name: str, industry: str, location: str, keywo
     return clean_text(f"{name} {industry} {location} {keywords} official website contact")
 
 
+def candidate_key(candidate: LeadCandidate) -> str:
+    return normalized_domain(candidate.website) or candidate.business_name.lower()
+
+
 def osm_tags_for_industry(industry: str) -> list[tuple[str, str]]:
     key = clean_text(industry).lower()
     if key in INDUSTRY_OSM_TAGS:
@@ -423,7 +456,7 @@ def build_overpass_query(area_id: int, tags: list[tuple[str, str]]) -> str:
         )
 
     return f"""
-    [out:json][timeout:25];
+    [out:json][timeout:20];
     area({area_id})->.searchArea;
     (
       {''.join(clauses)}
@@ -600,8 +633,7 @@ def format_osm_address(tags_data: dict[str, str]) -> str:
         tags_data.get("addr:city"),
         tags_data.get("addr:state"),
     ]
-    return clean_text(", ".join(part for part in parts if part)
-    )
+    return clean_text(", ".join(part for part in parts if part))
 
 
 def first_non_empty(*values: str | None) -> str:
