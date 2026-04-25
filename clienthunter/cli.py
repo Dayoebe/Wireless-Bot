@@ -12,6 +12,7 @@ from rich.table import Table
 from .auditor import WebsiteAuditor
 from .database import (
     VALID_LEAD_STATUSES,
+    delete_lead,
     get_lead,
     init_db,
     list_leads,
@@ -218,6 +219,33 @@ def leads(limit: int = typer.Option(20, "--limit", "-l")):
         )
 
     console.print(table)
+
+
+@app.command(name="delete")
+def delete_command(
+    lead_id: int = typer.Argument(..., help="ID of the lead to delete."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Delete without confirmation."),
+):
+    """Delete a saved lead permanently."""
+    lead = get_lead(lead_id)
+
+    if not lead:
+        console.print(f"[red]Lead #{lead_id} not found.[/red]")
+        raise typer.Exit(code=1)
+
+    if not yes:
+        confirmed = typer.confirm(
+            f"Delete lead #{lead_id} ({lead['business_name'] or lead['website']}) permanently?"
+        )
+        if not confirmed:
+            console.print("[yellow]Delete cancelled.[/yellow]")
+            return
+
+    if delete_lead(lead_id):
+        console.print(f"[green]Lead #{lead_id} deleted.[/green]")
+    else:
+        console.print(f"[red]Lead #{lead_id} could not be deleted.[/red]")
+        raise typer.Exit(code=1)
 
 
 @app.command(name="status")
