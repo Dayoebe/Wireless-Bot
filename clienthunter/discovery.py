@@ -35,12 +35,17 @@ EXCLUDED_DOMAINS = (
     "pinterest.com",
     "tripadvisor.com",
     "wikipedia.org",
+    "foursquare.com",
+    "nairaland.com",
+)
+
+SOFT_DIRECTORY_DOMAINS = (
     "businesslist.com.ng",
     "finelib.com",
     "vconnect.com",
     "yellowpages.com",
-    "foursquare.com",
-    "nairaland.com",
+    "ng-check.com",
+    "cybo.com",
 )
 
 IGNORED_EXTENSIONS = (
@@ -82,7 +87,14 @@ class LeadDiscovery:
     def __init__(self, timeout: int = 15, user_agent: str = DEFAULT_DISCOVERY_USER_AGENT):
         self.timeout = timeout
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": user_agent})
+        self.session.headers.update(
+            {
+                "User-Agent": user_agent,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+        )
+        self.last_debug: list[str] = []
 
     def discover(
         self,
@@ -94,52 +106,97 @@ class LeadDiscovery:
         industry = clean_text(industry)
         location = clean_text(location)
         keywords = clean_text(keywords)
+        self.last_debug = []
 
         if not industry:
             raise ValueError("Industry is required for lead discovery.")
 
         candidates: list[LeadCandidate] = []
+        fallback_candidates: list[LeadCandidate] = []
         seen_domains: set[str] = set()
 
         for query in build_search_queries(industry, location, keywords):
-            for result in self._search_duckduckgo(query):
-                website = result.get("url", "")
+            search_results = self._search_all(query)
+            self.last_debug.append(f"{query}: {len(search_results)} raw result(s)")
 
-                if not website or not is_probably_business_website(website):
+            for result in search_results:
+                website = result.get("url", "")
+                if not website:
                     continue
 
                 domain = normalized_domain(website)
                 if not domain or domain in seen_domains:
                     continue
 
-                seen_domains.add(domain)
                 title = clean_text(result.get("title", ""))
                 snippet = clean_text(result.get("snippet", ""))
                 business_name = infer_business_name(title, domain)
-
-                candidates.append(
-                    LeadCandidate(
-                        business_name=business_name,
-                        website=website,
-                        industry=industry,
-                        location=location,
-                        source="Web Discovery",
-                        search_query=query,
-                        title=title,
-                        snippet=truncate(snippet, 240),
-                    )
+                candidate = LeadCandidate(
+                    business_name=business_name,
+                    website=website,
+                    industry=industry,
+                    location=location,
+                    source=result.get("source") or "Web Discovery",
+                    search_query=query,
+                    title=title,
+                    snippet=truncate(snippet, 240),
                 )
 
-                if len(candidates) >= max_results:
-                    return candidates
+                if is_probably_business_website(website):
+                    seen_domains.add(domain)
+                    candidates.append(candidate)
+                    if len(candidates) >= max_results:
+                        return candidates
+                elif is_soft_directory_url(website):
+                    fallback_candidates.append(candidate)
 
-        return candidates
+        if candidates:
+            return candidates[:max_results]
 
-    def _search_duckduckgo(self, query: str) -> list[dict[str, str]]:
+        # If direct websites are scarce, return directory-like candidates instead of showing a blank page.
+        # These should be reviewed manually before outreach.
+        deduped_fallbacks: list[LeadCandidate] = []
+        fallback_seen: set[str] = set()
+        for candidate in fallback_candidates:
+            domain = normalized_domain(candidate.website)
+            if domain and domain not in fallback_seen:
+                fallback_seen.add(domain)
+                deduped_fallbacks.append(candidate)
+            if len(deduped_fallbacks) >= max_results:
+                break
+
+        return deduped_fallbacks
+
+    def _search_all(self, query: str) -> list[dict[str, str]]:
+        results: list[dict[str, str]] = []
+
+        for searcher in (self._search_duckduckgo_html, self._search_duckduckgo_lite, self._search_bing):
+            try:
+                results.extend(searcher(query))
+            except requests.RequestException as exc:
+                self.last_debug.append(f"{searcher.__name__} failed: {exc}")
+            except Exception as exc:
+                self.last_debug.append(f"{searcher.__name__} parse failed: {exc}")
+
+        return dedupe_results(results)
+
+    def _search_duckduckgo_html(self, query: str) -> list[dict[str, str]]:
         url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
         response = self.session.get(url, timeout=self.timeout)
         response.raise_for_status()
-        return parse_duckduckgo_results(response.text)
+        return add_source(parse_duckduckgo_results(response.text), "DuckDuckGo")
+
+    def _search_duckduckgo_lite(self, query: str) -> list[dict[str, str]]:
+        url = f"https://lite.duckduckgo.com/lite/?q={quote_plus(query)}"
+        response = self.session.get(url, timeout=self.timeout)
+        response.raise_for_status()
+        return add_source(parse_generic_results(response.text), "DuckDuckGo Lite")
+
+    def _search_bing(self, query: str) -> list[dict[str, str]]:
+        url = f"https://www.bing.com/search?q={quote_plus(query)}"
+        response = self.session.get(url, timeout=self.timeout)
+        response.raise_for_status()
+        return add_source(parse_bing_results(response.text), "Bing")
 
 
 def build_search_queries(industry: str, location: str = "", keywords: str = "") -> list[str]:
@@ -155,12 +212,19 @@ def build_search_queries(industry: str, location: str = "", keywords: str = "") 
 
     queries = [
         f"{base} official website",
-        f"{base} company website contact",
+        f"{base} contact website",
+        f"{base} company website",
         f"{base} business website",
     ]
 
     if location:
-        queries.append(f"{industry} in {location} official website")
+        queries.extend(
+            [
+                f"{industry} in {location} official website",
+                f"{industry} companies in {location} website",
+                f"{industry} {location} contact",
+            ]
+        )
 
     return dedupe_texts(queries)
 
@@ -187,14 +251,44 @@ def parse_duckduckgo_results(html: str) -> list[dict[str, str]]:
     if results:
         return results
 
+    return parse_generic_results(html)
+
+
+def parse_bing_results(html: str) -> list[dict[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[dict[str, str]] = []
+
+    for item in soup.select("li.b_algo"):
+        link = item.find("a", href=True)
+        if not link:
+            continue
+
+        title = clean_text(link.get_text(" ", strip=True))
+        url = normalize_result_url(link.get("href", ""))
+        snippet_tag = item.find("p")
+        snippet = clean_text(snippet_tag.get_text(" ", strip=True)) if snippet_tag else ""
+
+        if title and url:
+            results.append({"title": title, "url": url, "snippet": snippet})
+
+    if results:
+        return results
+
+    return parse_generic_results(html)
+
+
+def parse_generic_results(html: str) -> list[dict[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    results: list[dict[str, str]] = []
+
     for link in soup.find_all("a", href=True):
         title = clean_text(link.get_text(" ", strip=True))
-        resolved_url = resolve_duckduckgo_url(link["href"])
+        resolved_url = resolve_duckduckgo_url(link["href"]) or normalize_result_url(link["href"])
 
         if title and resolved_url:
             results.append({"title": title, "url": resolved_url, "snippet": ""})
 
-    return results
+    return dedupe_results(results)
 
 
 def resolve_duckduckgo_url(raw_url: str) -> str:
@@ -211,6 +305,18 @@ def resolve_duckduckgo_url(raw_url: str) -> str:
 
     if "uddg" in query and query["uddg"]:
         raw_url = query["uddg"][0]
+
+    return normalize_result_url(raw_url)
+
+
+def normalize_result_url(raw_url: str) -> str:
+    if not raw_url:
+        return ""
+
+    raw_url = unescape(raw_url).strip()
+
+    if raw_url.startswith("//"):
+        raw_url = "https:" + raw_url
 
     if not raw_url.startswith(("http://", "https://")):
         return ""
@@ -231,6 +337,9 @@ def is_probably_business_website(url: str) -> bool:
     if any(domain == excluded or domain.endswith(f".{excluded}") for excluded in EXCLUDED_DOMAINS):
         return False
 
+    if any(domain == directory or domain.endswith(f".{directory}") for directory in SOFT_DIRECTORY_DOMAINS):
+        return False
+
     if parsed.path.lower().endswith(IGNORED_EXTENSIONS):
         return False
 
@@ -238,6 +347,11 @@ def is_probably_business_website(url: str) -> bool:
         return False
 
     return True
+
+
+def is_soft_directory_url(url: str) -> bool:
+    domain = normalized_domain(url)
+    return any(domain == directory or domain.endswith(f".{directory}") for directory in SOFT_DIRECTORY_DOMAINS)
 
 
 def normalized_domain(url: str) -> str:
@@ -272,6 +386,7 @@ def remove_common_title_noise(value: str) -> str:
         "homepage",
         "welcome to",
         "best",
+        "contact us",
     )
 
     cleaned = value.strip()
@@ -299,3 +414,27 @@ def dedupe_texts(values: Iterable[str]) -> list[str]:
             output.append(cleaned)
 
     return output
+
+
+def dedupe_results(results: Iterable[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    output: list[dict[str, str]] = []
+
+    for result in results:
+        url = result.get("url", "")
+        domain = normalized_domain(url)
+        key = domain or url
+
+        if not key or key in seen:
+            continue
+
+        seen.add(key)
+        output.append(result)
+
+    return output
+
+
+def add_source(results: list[dict[str, str]], source: str) -> list[dict[str, str]]:
+    for result in results:
+        result["source"] = source
+    return results
