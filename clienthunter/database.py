@@ -343,3 +343,12 @@ def update_lead_status(
             )
 
         return conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+
+
+def delete_lead(lead_id: int) -> bool:
+    """Delete one saved lead permanently."""
+    init_db()
+
+    with get_connection() as conn:
+        cursor = conn.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+        return cursor.rowcount > 0
