@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import asdict, dataclass
 from html import unescape
 from typing import Iterable
-from urllib.parse import parse_qs, quote_plus, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,12 +14,12 @@ from .utils import normalize_url, truncate
 
 DEFAULT_DISCOVERY_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 WirelessBot/0.2"
+    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 WirelessBot/0.3"
 )
 
 OVERPASS_ENDPOINTS = (
-    "https://overpass.kumi.systems/api/interpreter",
     "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
 )
 
 EXCLUDED_DOMAINS = (
@@ -71,8 +72,9 @@ IGNORED_EXTENSIONS = (
 )
 
 INDUSTRY_OSM_TAGS: dict[str, list[tuple[str, str]]] = {
-    "school": [("amenity", "school")],
-    "schools": [("amenity", "school")],
+    "school": [("amenity", "school"), ("amenity", "college"), ("amenity", "university")],
+    "schools": [("amenity", "school"), ("amenity", "college"), ("amenity", "university")],
+    "college": [("amenity", "college"), ("amenity", "school")],
     "clinic": [("amenity", "clinic"), ("amenity", "doctors"), ("healthcare", "clinic")],
     "hospital": [("amenity", "hospital"), ("healthcare", "hospital")],
     "hotel": [("tourism", "hotel"), ("tourism", "guest_house")],
@@ -100,7 +102,7 @@ class LeadCandidate:
 
 
 class LeadDiscovery:
-    """Discover likely business websites from industry/location search terms."""
+    """Discover likely business websites or research prospects from industry/location terms."""
 
     def __init__(
         self,
@@ -136,23 +138,25 @@ class LeadDiscovery:
             raise ValueError("Industry is required for lead discovery.")
 
         candidates: list[LeadCandidate] = []
+        research_only: list[LeadCandidate] = []
+        directory_fallbacks: list[LeadCandidate] = []
         seen_keys: set[str] = set()
 
         for candidate in self._discover_from_openstreetmap(industry, location, keywords):
             key = candidate_key(candidate)
             if key in seen_keys:
                 continue
-
             seen_keys.add(key)
-            candidates.append(candidate)
+
+            if candidate.website:
+                candidates.append(candidate)
+            else:
+                research_only.append(candidate)
 
             if len(candidates) >= max_results:
                 return candidates
 
-        fallback_candidates: list[LeadCandidate] = []
         search_queries = build_search_queries(industry, location, keywords)
-
-        # Fast mode checks fewer search queries and avoids slower engines.
         if not self.enable_deep_search:
             search_queries = search_queries[:3]
 
@@ -193,22 +197,10 @@ class LeadDiscovery:
                     if len(candidates) >= max_results:
                         return candidates
                 elif is_soft_directory_url(website):
-                    fallback_candidates.append(candidate)
+                    directory_fallbacks.append(candidate)
 
-        if candidates:
-            return candidates[:max_results]
-
-        deduped_fallbacks: list[LeadCandidate] = []
-        for candidate in fallback_candidates:
-            key = candidate_key(candidate)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-            deduped_fallbacks.append(candidate)
-            if len(deduped_fallbacks) >= max_results:
-                break
-
-        return deduped_fallbacks
+        combined = candidates + research_only + directory_fallbacks
+        return combined[:max_results]
 
     def _discover_from_openstreetmap(
         self,
@@ -235,8 +227,7 @@ class LeadDiscovery:
             self.last_debug.append(f"OpenStreetMap skipped: no OSM tag mapping for {industry!r}")
             return []
 
-        query = build_overpass_query(area_id, tags)
-        payload = self._fetch_overpass(query)
+        payload = self._fetch_overpass(build_overpass_query(area_id, tags))
         if payload is None:
             return []
 
@@ -263,7 +254,7 @@ class LeadDiscovery:
 
             snippet_parts = [part for part in [address, phone, email] if part]
             if not website:
-                snippet_parts.append("No website listed in OpenStreetMap; research this prospect before outreach.")
+                snippet_parts.append("Research prospect: no website listed on map data yet.")
 
             candidates.append(
                 LeadCandidate(
@@ -283,9 +274,10 @@ class LeadDiscovery:
     def _fetch_overpass(self, query: str) -> dict | None:
         for endpoint in OVERPASS_ENDPOINTS:
             try:
-                response = self.session.get(
+                response = self.session.post(
                     endpoint,
-                    params={"data": query},
+                    data=query.encode("utf-8"),
+                    headers={"Content-Type": "text/plain; charset=utf-8"},
                     timeout=self.timeout + 12,
                 )
                 response.raise_for_status()
@@ -362,15 +354,12 @@ class LeadDiscovery:
 
 def build_search_queries(industry: str, location: str = "", keywords: str = "") -> list[str]:
     base_parts = [industry]
-
     if location:
         base_parts.append(location)
-
     if keywords:
         base_parts.append(keywords)
 
     base = " ".join(base_parts).strip()
-
     queries = [
         f"{base} official website",
         f"{base} contact website",
@@ -409,21 +398,6 @@ def build_manual_search_links(industry: str, location: str = "", keywords: str =
     return links
 
 
-def build_business_research_links(candidate: LeadCandidate) -> list[dict[str, str]]:
-    query = build_business_research_query(
-        candidate.business_name,
-        candidate.industry,
-        candidate.location,
-        "website contact",
-    )
-    encoded = quote_plus(query)
-    return [
-        {"source": "Google", "query": query, "url": f"https://www.google.com/search?q={encoded}"},
-        {"source": "Bing", "query": query, "url": f"https://www.bing.com/search?q={encoded}"},
-        {"source": "DuckDuckGo", "query": query, "url": f"https://duckduckgo.com/?q={encoded}"},
-    ]
-
-
 def build_business_research_query(name: str, industry: str, location: str, keywords: str = "") -> str:
     return clean_text(f"{name} {industry} {location} {keywords} official website contact")
 
@@ -456,13 +430,13 @@ def build_overpass_query(area_id: int, tags: list[tuple[str, str]]) -> str:
         )
 
     return f"""
-    [out:json][timeout:20];
-    area({area_id})->.searchArea;
-    (
-      {''.join(clauses)}
-    );
-    out center tags 50;
-    """
+[out:json][timeout:20];
+area({area_id})->.searchArea;
+(
+  {''.join(clauses)}
+);
+out center tags 50;
+"""
 
 
 def parse_duckduckgo_results(html: str) -> list[dict[str, str]]:
@@ -500,7 +474,7 @@ def parse_bing_results(html: str) -> list[dict[str, str]]:
             continue
 
         title = clean_text(link.get_text(" ", strip=True))
-        url = normalize_result_url(link.get("href", ""))
+        url = resolve_bing_url(link.get("href", ""))
         snippet_tag = item.find("p")
         snippet = clean_text(snippet_tag.get_text(" ", strip=True)) if snippet_tag else ""
 
@@ -519,7 +493,11 @@ def parse_generic_results(html: str) -> list[dict[str, str]]:
 
     for link in soup.find_all("a", href=True):
         title = clean_text(link.get_text(" ", strip=True))
-        resolved_url = resolve_duckduckgo_url(link["href"]) or normalize_result_url(link["href"])
+        resolved_url = (
+            resolve_bing_url(link["href"])
+            or resolve_duckduckgo_url(link["href"])
+            or normalize_result_url(link["href"])
+        )
 
         if title and resolved_url:
             results.append({"title": title, "url": resolved_url, "snippet": ""})
@@ -527,12 +505,47 @@ def parse_generic_results(html: str) -> list[dict[str, str]]:
     return dedupe_results(results)
 
 
+def resolve_bing_url(raw_url: str) -> str:
+    if not raw_url:
+        return ""
+
+    raw_url = unescape(raw_url).strip()
+    if raw_url.startswith("/"):
+        raw_url = urljoin("https://www.bing.com", raw_url)
+
+    parsed = urlparse(raw_url)
+    query = parse_qs(parsed.query)
+
+    if "u" in query and query["u"]:
+        decoded = decode_bing_u_parameter(query["u"][0])
+        if decoded:
+            return normalize_result_url(decoded)
+
+    return normalize_result_url(raw_url)
+
+
+def decode_bing_u_parameter(value: str) -> str:
+    value = unquote(value)
+
+    if value.startswith("a1"):
+        value = value[2:]
+
+    try:
+        padding = "=" * (-len(value) % 4)
+        decoded = base64.urlsafe_b64decode(value + padding).decode("utf-8", errors="ignore")
+        if decoded.startswith(("http://", "https://")):
+            return decoded
+    except Exception:
+        pass
+
+    return value if value.startswith(("http://", "https://")) else ""
+
+
 def resolve_duckduckgo_url(raw_url: str) -> str:
     if not raw_url:
         return ""
 
     raw_url = unescape(raw_url)
-
     if raw_url.startswith("//"):
         raw_url = "https:" + raw_url
 
@@ -550,7 +563,6 @@ def normalize_result_url(raw_url: str) -> str:
         return ""
 
     raw_url = unescape(raw_url).strip()
-
     if raw_url.startswith("//"):
         raw_url = "https:" + raw_url
 
