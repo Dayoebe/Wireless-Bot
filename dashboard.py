@@ -62,15 +62,208 @@ CUSTOM_CSS = """
         font-weight: 700;
         text-transform: uppercase;
     }
+    .wireless-loader {
+        position: relative;
+        overflow: hidden;
+        padding: 1.25rem;
+        border-radius: 1.35rem;
+        background: radial-gradient(circle at top left, rgba(34,197,94,.18), transparent 30%),
+                    linear-gradient(135deg, #020617 0%, #0f172a 45%, #1e293b 100%);
+        color: #fff;
+        margin: 1rem 0;
+        border: 1px solid rgba(255,255,255,0.10);
+        box-shadow: 0 18px 45px rgba(2, 6, 23, 0.28);
+    }
+    .wireless-loader::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(110deg, transparent 0%, rgba(255,255,255,.08) 45%, transparent 70%);
+        transform: translateX(-100%);
+        animation: shimmerMove 2.8s infinite;
+        pointer-events: none;
+    }
+    .wireless-loader-grid {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        grid-template-columns: 108px 1fr;
+        gap: 1rem;
+        align-items: center;
+    }
+    .wireless-loader h4 {
+        margin: 0 0 .4rem 0;
+        font-size: 1.05rem;
+        color: #ffffff;
+    }
+    .wireless-loader p {
+        margin: 0;
+        color: #dbeafe;
+        font-size: .94rem;
+        line-height: 1.55;
+    }
+    .loader-subtitle {
+        margin-top: .35rem !important;
+        color: #93c5fd !important;
+        font-size: .86rem !important;
+    }
+    .radar-shell {
+        width: 96px;
+        height: 96px;
+        border-radius: 999px;
+        position: relative;
+        margin: 0 auto;
+        background:
+            radial-gradient(circle at center, rgba(134,239,172,.30) 0 7%, transparent 8% 100%),
+            radial-gradient(circle, rgba(255,255,255,.12) 1px, transparent 1px);
+        border: 1px solid rgba(255,255,255,.16);
+        overflow: hidden;
+        box-shadow: inset 0 0 25px rgba(34,197,94,.12), 0 0 22px rgba(34,197,94,.10);
+    }
+    .radar-ring,
+    .radar-ring::before,
+    .radar-ring::after {
+        content: "";
+        position: absolute;
+        inset: 12%;
+        border: 1px solid rgba(255,255,255,.16);
+        border-radius: 999px;
+    }
+    .radar-ring::before { inset: 22%; }
+    .radar-ring::after { inset: 34%; }
+    .radar-cross-x,
+    .radar-cross-y {
+        position: absolute;
+        background: rgba(255,255,255,.11);
+    }
+    .radar-cross-x { top: 50%; left: 0; right: 0; height: 1px; }
+    .radar-cross-y { left: 50%; top: 0; bottom: 0; width: 1px; }
+    .radar-sweep {
+        position: absolute;
+        inset: -12%;
+        background: conic-gradient(
+            from 0deg,
+            rgba(34,197,94,0.00) 0deg,
+            rgba(34,197,94,0.00) 275deg,
+            rgba(74,222,128,0.18) 318deg,
+            rgba(134,239,172,0.75) 348deg,
+            rgba(34,197,94,0.00) 360deg
+        );
+        border-radius: 999px;
+        animation: radarSpin 2.2s linear infinite;
+    }
+    .radar-dot {
+        position: absolute;
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: #86efac;
+        box-shadow: 0 0 0 0 rgba(134,239,172,.75);
+        animation: dotPulse 1.8s infinite;
+    }
+    .radar-dot.dot-1 { top: 22px; left: 59px; animation-delay: 0s; }
+    .radar-dot.dot-2 { top: 57px; left: 27px; animation-delay: .45s; }
+    .radar-dot.dot-3 { top: 62px; left: 66px; animation-delay: .9s; }
+    .loader-dots {
+        display: flex;
+        gap: .42rem;
+        margin-top: .8rem;
+        align-items: center;
+    }
+    .loader-dots span {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: #93c5fd;
+        animation: bounceDots 1.2s infinite ease-in-out;
+    }
+    .loader-dots span:nth-child(2) { animation-delay: .15s; }
+    .loader-dots span:nth-child(3) { animation-delay: .3s; }
+    .signal-bar-wrap {
+        display: flex;
+        gap: 4px;
+        align-items: end;
+        margin-top: .9rem;
+    }
+    .signal-bar {
+        width: 6px;
+        border-radius: 999px;
+        background: linear-gradient(180deg, #93c5fd, #22c55e);
+        animation: signalJump 1s infinite ease-in-out;
+    }
+    .signal-bar:nth-child(1) { height: 10px; animation-delay: 0s; }
+    .signal-bar:nth-child(2) { height: 16px; animation-delay: .1s; }
+    .signal-bar:nth-child(3) { height: 22px; animation-delay: .2s; }
+    .signal-bar:nth-child(4) { height: 28px; animation-delay: .3s; }
+    .mission-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: .35rem;
+        margin-bottom: .55rem;
+        padding: .18rem .55rem;
+        border-radius: 999px;
+        background: rgba(59,130,246,.18);
+        color: #bfdbfe;
+        font-size: .75rem;
+        font-weight: 700;
+        letter-spacing: .02em;
+        text-transform: uppercase;
+    }
+    @keyframes radarSpin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+    @keyframes dotPulse {
+        0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(134,239,172,.75); }
+        70% { transform: scale(1.12); box-shadow: 0 0 0 13px rgba(134,239,172,0); }
+        100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(134,239,172,0); }
+    }
+    @keyframes bounceDots {
+        0%, 80%, 100% { transform: translateY(0); opacity: .55; }
+        40% { transform: translateY(-6px); opacity: 1; }
+    }
+    @keyframes signalJump {
+        0%, 100% { transform: scaleY(0.78); opacity: .72; }
+        50% { transform: scaleY(1.22); opacity: 1; }
+    }
+    @keyframes shimmerMove {
+        0% { transform: translateX(-110%); }
+        70%, 100% { transform: translateX(120%); }
+    }
+    @media (max-width: 768px) {
+        .wireless-loader-grid {
+            grid-template-columns: 1fr;
+            text-align: center;
+        }
+        .loader-dots,
+        .signal-bar-wrap {
+            justify-content: center;
+        }
+    }
 </style>
 """
 
-FUN_DISCOVERY_MESSAGES = [
-    "📡 Raising antenna... looking for businesses around your target location.",
-    "🧭 Checking local map signals first, because real clients live offline too.",
-    "🕵️ Filtering noisy results so you do not chase shadows.",
-    "💼 Hunting for prospects Wireless can turn into paying clients.",
-    "🚀 Almost there... preparing candidate leads and fallback searches.",
+FUN_DISCOVERY_STAGES = [
+    (
+        "📡 Raising antenna and scanning local signals.",
+        "Looking around your target location for possible businesses.",
+    ),
+    (
+        "🧭 Checking maps, directories, and search result trails.",
+        "Real clients live offline too, so map data comes first.",
+    ),
+    (
+        "🕵️ Filtering weak matches and suspicious links.",
+        "Dropping noisy pages so you do not chase shadows.",
+    ),
+    (
+        "💼 Packing promising prospects into your pipeline.",
+        "The goal is simple: fewer guesses, more client conversations.",
+    ),
+    (
+        "🚀 Almost there. Preparing candidates and fallback searches.",
+        "If automatic discovery gets blocked, you still get one-click research links.",
+    ),
 ]
 
 
@@ -90,6 +283,38 @@ def clear_lead_cache() -> None:
 def refresh_dashboard() -> None:
     clear_lead_cache()
     st.rerun()
+
+
+def render_waiting_animation(stage_text: str, subtitle: str = "") -> str:
+    subtitle_html = f"<p class='loader-subtitle'>{subtitle}</p>" if subtitle else ""
+    return f"""
+    <div class="wireless-loader">
+        <div class="wireless-loader-grid">
+            <div class="radar-shell">
+                <div class="radar-ring"></div>
+                <div class="radar-cross-x"></div>
+                <div class="radar-cross-y"></div>
+                <div class="radar-sweep"></div>
+                <div class="radar-dot dot-1"></div>
+                <div class="radar-dot dot-2"></div>
+                <div class="radar-dot dot-3"></div>
+            </div>
+            <div>
+                <div class="mission-chip">Wireless Mission Active</div>
+                <h4>Wireless Bot is scouting for leads...</h4>
+                <p>{stage_text}</p>
+                {subtitle_html}
+                <div class="loader-dots"><span></span><span></span><span></span></div>
+                <div class="signal-bar-wrap">
+                    <div class="signal-bar"></div>
+                    <div class="signal-bar"></div>
+                    <div class="signal-bar"></div>
+                    <div class="signal-bar"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+    """
 
 
 def leads_dataframe(leads: list[dict[str, Any]]) -> pd.DataFrame:
@@ -258,33 +483,36 @@ def render_discover_leads() -> None:
             st.error("Please enter an industry first.")
             return
 
-        progress = st.progress(0)
-        message_box = st.empty()
-        for index, message in enumerate(FUN_DISCOVERY_MESSAGES[:-1], start=1):
-            message_box.info(message)
-            progress.progress(index / len(FUN_DISCOVERY_MESSAGES))
-            time.sleep(0.25)
+        loading_box = st.empty()
+        for stage_text, subtitle in FUN_DISCOVERY_STAGES:
+            loading_box.markdown(
+                render_waiting_animation(stage_text, subtitle),
+                unsafe_allow_html=True,
+            )
+            time.sleep(0.35)
 
-        with st.spinner("Wireless Bot is checking maps, search pages, and prospect signals..."):
-            try:
-                discovery = LeadDiscovery(timeout=8, enable_deep_search=deep_search)
-                candidates = discovery.discover(
-                    industry=industry,
-                    location=location,
-                    keywords=keywords,
-                    max_results=max_results,
-                )
-            except Exception as exc:
-                progress.empty()
-                message_box.empty()
-                st.error(f"Discovery failed: {exc}")
-                return
+        try:
+            discovery = LeadDiscovery(timeout=8, enable_deep_search=deep_search)
+            candidates = discovery.discover(
+                industry=industry,
+                location=location,
+                keywords=keywords,
+                max_results=max_results,
+            )
+        except Exception as exc:
+            loading_box.empty()
+            st.error(f"Discovery failed: {exc}")
+            return
 
-        progress.progress(1.0)
-        message_box.success(FUN_DISCOVERY_MESSAGES[-1])
-        time.sleep(0.2)
-        progress.empty()
-        message_box.empty()
+        loading_box.markdown(
+            render_waiting_animation(
+                "✅ Mission complete. Sorting what Wireless Bot found.",
+                "Preparing results, diagnostics, and fallback links now.",
+            ),
+            unsafe_allow_html=True,
+        )
+        time.sleep(0.35)
+        loading_box.empty()
 
         st.session_state["last_discovery_inputs"] = {
             "industry": industry,
