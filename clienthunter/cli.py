@@ -18,6 +18,7 @@ from .database import (
     save_lead,
     update_lead_status,
 )
+from .discovery import LeadDiscovery
 from .exporter import export_leads
 from .outreach import build_outreach
 
@@ -30,6 +31,79 @@ def initdb():
     """Create the local SQLite database."""
     init_db()
     console.print("[green]Database initialized successfully.[/green]")
+
+
+@app.command()
+def discover(
+    industry: str = typer.Argument(..., help="Industry to search, for example: hotel, clinic, school, real estate."),
+    location: Optional[str] = typer.Option(None, "--location", "-l", help="Target location, for example: Akure, Lagos, Abuja."),
+    keywords: Optional[str] = typer.Option(None, "--keywords", "-k", help="Extra search keywords, for example: booking, appointment, services."),
+    limit: int = typer.Option(10, "--limit", help="Maximum candidate websites to discover."),
+    save: bool = typer.Option(False, "--save", help="Audit and save discovered websites as leads."),
+):
+    """Discover possible business websites from industry and location."""
+    discovery = LeadDiscovery()
+
+    try:
+        candidates = discovery.discover(
+            industry=industry,
+            location=location or "",
+            keywords=keywords or "",
+            max_results=limit,
+        )
+    except Exception as exc:
+        console.print(f"[red]Discovery failed: {exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if not candidates:
+        console.print("[yellow]No candidate websites found. Try a broader industry/location keyword.[/yellow]")
+        return
+
+    table = Table(title="Discovered Lead Candidates")
+    table.add_column("#", justify="right")
+    table.add_column("Business")
+    table.add_column("Website")
+    table.add_column("Query")
+
+    for index, candidate in enumerate(candidates, start=1):
+        table.add_row(
+            str(index),
+            candidate.business_name,
+            candidate.website,
+            candidate.search_query,
+        )
+
+    console.print(table)
+
+    if not save:
+        console.print("[bold cyan]Tip:[/bold cyan] Add --save to audit and save these candidates as leads.")
+        return
+
+    auditor = WebsiteAuditor()
+    saved = 0
+
+    for candidate in candidates:
+        console.print(f"[cyan]Auditing[/cyan] {candidate.website}")
+
+        try:
+            audit = auditor.audit(candidate.website)
+            lead_id = save_lead(
+                audit,
+                business_name=candidate.business_name,
+                industry=candidate.industry,
+                source=candidate.source,
+                location=candidate.location,
+                status="new",
+                notes=f"Discovered from query: {candidate.search_query}",
+            )
+        except Exception as exc:
+            console.print(f"[red]Skipped {candidate.website}: {exc}[/red]")
+            continue
+
+        saved += 1
+        console.print(f"[green]Saved lead #{lead_id}[/green] | Score: {audit.opportunity_score}/100")
+
+    console.print(f"[bold green]Done. Saved {saved} discovered lead(s).[/bold green]")
 
 
 @app.command()
