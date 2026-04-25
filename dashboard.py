@@ -11,6 +11,7 @@ from clienthunter.auditor import WebsiteAuditor
 from clienthunter.database import (
     VALID_LEAD_STATUSES,
     all_leads,
+    delete_lead,
     init_db,
     save_lead,
     update_lead_status,
@@ -60,10 +61,6 @@ CUSTOM_CSS = """
         font-weight: 700;
         text-transform: uppercase;
     }
-    .small-muted {
-        color: #64748b;
-        font-size: .88rem;
-    }
 </style>
 """
 
@@ -81,12 +78,16 @@ def clear_lead_cache() -> None:
     load_leads.clear()
 
 
+def refresh_dashboard() -> None:
+    clear_lead_cache()
+    st.rerun()
+
+
 def leads_dataframe(leads: list[dict[str, Any]]) -> pd.DataFrame:
     if not leads:
         return pd.DataFrame()
 
     df = pd.DataFrame(leads)
-
     preferred_columns = [
         "id",
         "business_name",
@@ -106,7 +107,6 @@ def leads_dataframe(leads: list[dict[str, Any]]) -> pd.DataFrame:
         "created_at",
         "updated_at",
     ]
-
     available_columns = [column for column in preferred_columns if column in df.columns]
     remaining_columns = [column for column in df.columns if column not in available_columns]
     return df[available_columns + remaining_columns]
@@ -119,9 +119,9 @@ def filter_leads(df: pd.DataFrame) -> pd.DataFrame:
     with st.sidebar:
         st.subheader("Filters")
         status_options = ["all", *VALID_LEAD_STATUSES]
-        selected_status = st.selectbox("Status", status_options)
-        min_score = st.slider("Minimum opportunity score", 0, 100, 0)
-        search_term = st.text_input("Search business, website, industry, or location")
+        selected_status = st.selectbox("Status", status_options, key="sidebar_status_filter")
+        min_score = st.slider("Minimum opportunity score", 0, 100, 0, key="sidebar_min_score_filter")
+        search_term = st.text_input("Search business, website, industry, or location", key="sidebar_search_filter")
 
     filtered = df.copy()
 
@@ -154,12 +154,11 @@ def lead_label(lead: dict[str, Any]) -> str:
     return f"#{lead['id']} · {business} · {status} · {score}/100 · {website}"
 
 
-def selected_lead_from_sidebar(leads: list[dict[str, Any]]) -> dict[str, Any] | None:
+def selected_lead(leads: list[dict[str, Any]], key: str, label: str = "Choose a lead") -> dict[str, Any] | None:
     if not leads:
         return None
-
     options = {lead_label(lead): lead for lead in leads}
-    selected = st.selectbox("Choose a lead", list(options.keys()))
+    selected = st.selectbox(label, list(options.keys()), key=key)
     return options[selected]
 
 
@@ -203,11 +202,7 @@ def render_overview(leads: list[dict[str, Any]], filtered_df: pd.DataFrame) -> N
             st.bar_chart(status_counts, x="status", y="count")
 
     with table_col:
-        st.dataframe(
-            filtered_df,
-            use_container_width=True,
-            hide_index=True,
-        )
+        st.dataframe(filtered_df, use_container_width=True, hide_index=True)
 
     csv_data = filtered_df.to_csv(index=False).encode("utf-8")
     st.download_button(
@@ -215,6 +210,7 @@ def render_overview(leads: list[dict[str, Any]], filtered_df: pd.DataFrame) -> N
         data=csv_data,
         file_name="wireless_bot_filtered_leads.csv",
         mime="text/csv",
+        key="download_filtered_leads_csv",
     )
 
 
@@ -225,19 +221,17 @@ def render_discover_leads() -> None:
     with st.form("discover_leads_form"):
         col1, col2 = st.columns(2)
         with col1:
-            industry = st.text_input("Industry", placeholder="Hotel, clinic, school, real estate, logistics...")
-            location = st.text_input("Location", placeholder="Akure, Lagos, Abuja, Ibadan...")
+            industry = st.text_input("Industry", placeholder="Hotel, clinic, school, real estate, logistics...", key="discover_industry")
+            location = st.text_input("Location", placeholder="Akure, Lagos, Abuja, Ibadan...", key="discover_location")
         with col2:
-            keywords = st.text_input("Extra keywords", placeholder="booking, appointment, services, contact...")
-            max_results = st.slider("Maximum candidates", 3, 25, 10)
-
+            keywords = st.text_input("Extra keywords", placeholder="booking, appointment, services, contact...", key="discover_keywords")
+            max_results = st.slider("Maximum candidates", 3, 25, 10, key="discover_max_results")
         submitted = st.form_submit_button("Find Candidate Websites", type="primary")
 
     if submitted:
         if not industry.strip():
             st.error("Please enter an industry first.")
             return
-
         with st.spinner("Searching for candidate business websites..."):
             try:
                 candidates = LeadDiscovery().discover(
@@ -249,7 +243,6 @@ def render_discover_leads() -> None:
             except Exception as exc:
                 st.error(f"Discovery failed: {exc}")
                 return
-
         st.session_state["discovered_candidates"] = [candidate.to_dict() for candidate in candidates]
 
     candidates = st.session_state.get("discovered_candidates", [])
@@ -257,6 +250,11 @@ def render_discover_leads() -> None:
     if not candidates:
         st.info("No candidates yet. Search with an industry and location to begin.")
         return
+
+    if st.button("Clear Previous Discovery Results", key="clear_discovery_results"):
+        st.session_state.pop("discovered_candidates", None)
+        st.success("Previous discovery results cleared.")
+        st.rerun()
 
     candidates_df = pd.DataFrame(candidates)
     st.write("### Candidate Websites")
@@ -268,7 +266,7 @@ def render_discover_leads() -> None:
 
     st.caption("Review the candidates before saving. Search results can include false positives, so always verify important leads manually before outreach.")
 
-    if not st.button("Audit and Save These Candidates", type="primary"):
+    if not st.button("Audit and Save These Candidates", type="primary", key="audit_save_discovered_candidates"):
         return
 
     auditor = WebsiteAuditor()
@@ -279,14 +277,12 @@ def render_discover_leads() -> None:
 
     for index, candidate in enumerate(candidates, start=1):
         website = candidate.get("website")
-
         if not website:
             skipped += 1
             progress.progress(index / len(candidates))
             continue
 
         status_box.write(f"Auditing {website}...")
-
         try:
             audit = auditor.audit(website)
             save_lead(
@@ -317,18 +313,18 @@ def render_scan_form() -> None:
     with st.form("scan_lead_form"):
         col1, col2 = st.columns(2)
         with col1:
-            url = st.text_input("Website URL", placeholder="https://example.com")
-            business_name = st.text_input("Business Name", placeholder="Example Hotel")
-            industry = st.text_input("Industry", placeholder="Hotel, Clinic, SaaS, School...")
-            location = st.text_input("Location", placeholder="Akure, Lagos, Abuja...")
+            url = st.text_input("Website URL", placeholder="https://example.com", key="manual_url")
+            business_name = st.text_input("Business Name", placeholder="Example Hotel", key="manual_business_name")
+            industry = st.text_input("Industry", placeholder="Hotel, Clinic, SaaS, School...", key="manual_industry")
+            location = st.text_input("Location", placeholder="Akure, Lagos, Abuja...", key="manual_location")
         with col2:
-            source = st.text_input("Lead Source", placeholder="Google Business Profile, LinkedIn, Manual Research...")
-            contact_name = st.text_input("Contact Name", placeholder="Manager")
-            contact_email = st.text_input("Contact Email", placeholder="hello@example.com")
-            phone = st.text_input("Phone", placeholder="+234...")
+            source = st.text_input("Lead Source", placeholder="Google Business Profile, LinkedIn, Manual Research...", key="manual_source")
+            contact_name = st.text_input("Contact Name", placeholder="Manager", key="manual_contact_name")
+            contact_email = st.text_input("Contact Email", placeholder="hello@example.com", key="manual_contact_email")
+            phone = st.text_input("Phone", placeholder="+234...", key="manual_phone")
 
-        status = st.selectbox("Initial Status", VALID_LEAD_STATUSES, index=0)
-        notes = st.text_area("Internal Notes", placeholder="Why this lead looks promising, who to contact, or what you noticed.")
+        status = st.selectbox("Initial Status", VALID_LEAD_STATUSES, index=0, key="manual_initial_status")
+        notes = st.text_area("Internal Notes", placeholder="Why this lead looks promising, who to contact, or what you noticed.", key="manual_notes")
         submitted = st.form_submit_button("Scan Website and Save Lead", type="primary")
 
     if not submitted:
@@ -340,8 +336,7 @@ def render_scan_form() -> None:
 
     with st.spinner("Auditing website and saving lead..."):
         try:
-            auditor = WebsiteAuditor()
-            audit = auditor.audit(url)
+            audit = WebsiteAuditor().audit(url)
             lead_id = save_lead(
                 audit,
                 business_name=business_name or None,
@@ -383,81 +378,90 @@ def render_scan_form() -> None:
 def render_manage_leads(leads: list[dict[str, Any]]) -> None:
     st.subheader("Manage Lead Status")
 
-    selected_lead = selected_lead_from_sidebar(leads)
-    if selected_lead is None:
+    selected = selected_lead(leads, key="manage_status_lead_select")
+    if selected is None:
         st.info("No leads yet. Discover, scan, or import leads first.")
         return
 
-    st.markdown(f"**Business:** {selected_lead.get('business_name') or '-'}")
-    st.markdown(f"**Website:** {selected_lead.get('website') or '-'}")
-    st.markdown(f"**Current Status:** <span class='status-pill'>{selected_lead.get('status') or 'new'}</span>", unsafe_allow_html=True)
+    st.markdown(f"**Business:** {selected.get('business_name') or '-'}")
+    st.markdown(f"**Website:** {selected.get('website') or '-'}")
+    st.markdown(f"**Current Status:** <span class='status-pill'>{selected.get('status') or 'new'}</span>", unsafe_allow_html=True)
 
-    current_status = selected_lead.get("status") or "new"
+    current_status = selected.get("status") or "new"
     current_index = VALID_LEAD_STATUSES.index(current_status) if current_status in VALID_LEAD_STATUSES else 0
 
     with st.form("update_status_form"):
-        new_status = st.selectbox("New Status", VALID_LEAD_STATUSES, index=current_index)
-        notes = st.text_area("Notes", value=selected_lead.get("notes") or "")
+        new_status = st.selectbox("New Status", VALID_LEAD_STATUSES, index=current_index, key="manage_status_new_status")
+        notes = st.text_area("Notes", value=selected.get("notes") or "", key="manage_status_notes")
         submitted = st.form_submit_button("Update Status", type="primary")
 
     if submitted:
         try:
-            updated = update_lead_status(int(selected_lead["id"]), new_status, notes=notes or None)
+            updated = update_lead_status(int(selected["id"]), new_status, notes=notes or None)
             clear_lead_cache()
         except Exception as exc:
             st.error(f"Could not update lead: {exc}")
             return
-
         if updated is None:
             st.error("Lead not found.")
         else:
-            st.success(f"Lead #{selected_lead['id']} updated to {new_status}.")
+            st.success(f"Lead #{selected['id']} updated to {new_status}.")
+
+    st.divider()
+    st.write("### Remove Lead")
+    confirm_delete = st.checkbox(
+        f"I understand this will permanently delete lead #{selected['id']}.",
+        key="manage_delete_confirm",
+    )
+    if st.button("Delete Selected Lead", type="secondary", disabled=not confirm_delete, key="manage_delete_button"):
+        if delete_lead(int(selected["id"])):
+            st.success(f"Lead #{selected['id']} deleted.")
+            refresh_dashboard()
+        else:
+            st.error("Lead could not be deleted.")
 
 
 def render_outreach(leads: list[dict[str, Any]]) -> None:
     st.subheader("Outreach Generator")
 
-    selected_lead = selected_lead_from_sidebar(leads)
-    if selected_lead is None:
+    selected = selected_lead(leads, key="outreach_lead_select")
+    if selected is None:
         st.info("No leads yet. Discover, scan, or import leads first.")
         return
 
-    outreach = build_outreach(selected_lead)
-
+    outreach = build_outreach(selected)
     st.write("Use these as a starting point. Personalize before sending.")
 
     st.write("### Email")
-    st.text_area("Email Pitch", outreach["email"], height=320)
+    st.text_area("Email Pitch", outreach["email"], height=320, key="outreach_email_text")
 
     st.write("### WhatsApp")
-    st.text_area("WhatsApp Pitch", outreach["whatsapp"], height=180)
+    st.text_area("WhatsApp Pitch", outreach["whatsapp"], height=180, key="outreach_whatsapp_text")
 
     st.write("### Mini Proposal")
-    st.text_area("Mini Proposal", outreach["proposal"], height=420)
+    st.text_area("Mini Proposal", outreach["proposal"], height=420, key="outreach_proposal_text")
 
 
 def render_bulk_import() -> None:
     st.subheader("Bulk Import and Scan")
     st.caption("Upload a CSV with business_name, website, industry, source, contact_name, contact_email, phone, location, status, and notes columns.")
 
-    uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+    uploaded_file = st.file_uploader("Upload CSV", type=["csv"], key="bulk_import_csv")
 
     if uploaded_file is None:
         st.info("You can start with data/sample_leads.csv as a template.")
         return
 
     content = uploaded_file.getvalue().decode("utf-8-sig")
-    reader = csv.DictReader(StringIO(content))
-    rows = list(reader)
+    rows = list(csv.DictReader(StringIO(content)))
 
     if not rows:
         st.error("The uploaded CSV is empty.")
         return
 
-    preview_df = pd.DataFrame(rows)
-    st.dataframe(preview_df, use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-    if not st.button("Scan and Save Uploaded Leads", type="primary"):
+    if not st.button("Scan and Save Uploaded Leads", type="primary", key="bulk_scan_save"):
         return
 
     auditor = WebsiteAuditor()
@@ -468,14 +472,12 @@ def render_bulk_import() -> None:
 
     for index, row in enumerate(rows, start=1):
         website = row.get("website") or row.get("url")
-
         if not website:
             skipped += 1
             progress.progress(index / len(rows))
             continue
 
         status_box.write(f"Scanning {website}...")
-
         try:
             audit = auditor.audit(website)
             save_lead(
@@ -522,19 +524,14 @@ def main() -> None:
 
     with overview_tab:
         render_overview(leads, filtered_df)
-
     with discover_tab:
         render_discover_leads()
-
     with scan_tab:
         render_scan_form()
-
     with manage_tab:
         render_manage_leads(leads)
-
     with outreach_tab:
         render_outreach(leads)
-
     with import_tab:
         render_bulk_import()
 
