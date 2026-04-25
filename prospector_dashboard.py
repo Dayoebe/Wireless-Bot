@@ -18,6 +18,7 @@ from clienthunter.database import (
 )
 from clienthunter.discovery import LeadDiscovery, build_manual_search_links
 from clienthunter.outreach import build_outreach
+from clienthunter.places import GooglePlacesDiscovery
 
 st.set_page_config(
     page_title="Wireless Bot Prospector",
@@ -130,15 +131,6 @@ CUSTOM_CSS = """
 }
 .loader-dots span:nth-child(2) { animation-delay: .15s; }
 .loader-dots span:nth-child(3) { animation-delay: .3s; }
-.status-pill {
-    display: inline-block;
-    padding: .18rem .6rem;
-    border-radius: 999px;
-    background: #e2e8f0;
-    color: #0f172a;
-    font-size: .78rem;
-    font-weight: 700;
-}
 @keyframes radarSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 @keyframes dotPulse {
     0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(134,239,172,.75); }
@@ -161,10 +153,10 @@ CUSTOM_CSS = """
 """
 
 DISCOVERY_STAGES = [
-    ("📡 Raising antenna and scanning local signals.", "Looking for businesses with or without websites."),
-    ("🧭 Checking maps, directories, and search trails.", "Phone numbers, emails, addresses, and websites all count."),
-    ("🕵️ Filtering weak matches and suspicious links.", "The mission is useful prospects, not empty tables."),
-    ("💼 Packaging prospects into your pipeline.", "Businesses without websites may be your hottest leads."),
+    ("📡 Checking Google Places first.", "This is the real prospecting source: names, addresses, phones, websites, ratings, and Maps links."),
+    ("🧭 Searching local business signals.", "Businesses without websites count too; those may be the best website-design prospects."),
+    ("🕵️ Filtering obvious junk.", "No more Hotel California-style nonsense if Google Places is configured."),
+    ("💼 Packaging prospects into your pipeline.", "Saving useful businesses, not empty tables."),
 ]
 
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -194,7 +186,7 @@ def loader_html(title: str, subtitle: str) -> str:
             </div>
             <div>
                 <div class="mission-chip">Wireless Mission Active</div>
-                <h4>Wireless Bot is scouting prospects...</h4>
+                <h4>Wireless Bot is scouting real prospects...</h4>
                 <p>{title}</p>
                 <p>{subtitle}</p>
                 <div class="loader-dots"><span></span><span></span><span></span></div>
@@ -209,7 +201,7 @@ def render_header() -> None:
         """
         <div class="hero">
             <h1>📡 Wireless Bot Prospector</h1>
-            <p>Find business prospects with or without websites, save contacts, track follow-up, and generate outreach for client acquisition.</p>
+            <p>Find real business prospects with or without websites, save contacts, track follow-up, and generate outreach for client acquisition.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -255,13 +247,49 @@ def filter_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def candidate_columns(df: pd.DataFrame) -> list[str]:
-    wanted = ["business_name", "confidence", "website", "phone", "email", "address", "industry", "location", "source", "search_query", "snippet"]
+    wanted = [
+        "business_name", "confidence", "website", "phone", "email", "address",
+        "maps_url", "rating", "user_ratings_total", "industry", "location", "source", "snippet"
+    ]
     return [col for col in wanted if col in df.columns]
+
+
+def discover_candidates(industry: str, location: str, keywords: str, max_results: int, deep_search: bool) -> tuple[list[dict[str, Any]], list[str], str]:
+    debug: list[str] = []
+    source_used = "Google Places"
+
+    places = GooglePlacesDiscovery(timeout=15)
+    if places.is_configured:
+        place_results = places.discover(industry, location, keywords, max_results=max_results)
+        debug.extend(places.last_debug)
+        if place_results:
+            return [candidate.to_dict() for candidate in place_results], debug, source_used
+        debug.append("Google Places returned no results, so Wireless Bot tried free fallback sources.")
+    else:
+        debug.append("Google Places is not configured. Add GOOGLE_PLACES_API_KEY to get real business results.")
+
+    source_used = "Free fallback sources"
+    fallback = LeadDiscovery(timeout=8, enable_deep_search=deep_search)
+    fallback_results = fallback.discover(industry, location, keywords, max_results=max_results)
+    debug.extend(fallback.last_debug)
+    return [candidate.to_dict() for candidate in fallback_results], debug, source_used
+
+
+def render_google_places_notice() -> None:
+    places = GooglePlacesDiscovery()
+    if places.is_configured:
+        st.success("Google Places is configured. Searches will use real Google Maps business data first.")
+    else:
+        st.warning(
+            "Google Places is not configured yet. Free fallback search can be noisy. "
+            "For real prospecting results, add GOOGLE_PLACES_API_KEY to your .env file."
+        )
 
 
 def render_discovery() -> None:
     st.subheader("Discover Business Prospects")
-    st.caption("This now returns businesses with websites, businesses without websites, phone numbers, emails, addresses, and research prospects where available.")
+    st.caption("Use Google Places for real businesses: name, address, phone, website, rating, and Google Maps link where available.")
+    render_google_places_notice()
 
     with st.form("discover_form"):
         col1, col2 = st.columns(2)
@@ -271,20 +299,19 @@ def render_discovery() -> None:
         with col2:
             keywords = st.text_input("Extra keywords", placeholder="contact, booking, admission, appointment...", key="disc_keywords")
             max_results = st.slider("Maximum prospects", 3, 50, 20, key="disc_max")
-            deep_search = st.toggle("Deep search", value=False, help="Slower; checks extra search sources.", key="disc_deep")
-        submitted = st.form_submit_button("Find Business Prospects", type="primary")
+            deep_search = st.toggle("Deep fallback search", value=False, help="Slower; checks extra free search sources if Google Places is missing or empty.", key="disc_deep")
+        submitted = st.form_submit_button("Find Real Business Prospects", type="primary")
 
     if submitted:
-        if not industry.strip():
-            st.error("Enter an industry first.")
+        if not industry.strip() or not location.strip():
+            st.error("Enter both industry and location first.")
             return
         loading = st.empty()
         for title, subtitle in DISCOVERY_STAGES:
             loading.markdown(loader_html(title, subtitle), unsafe_allow_html=True)
             time.sleep(0.35)
         try:
-            discovery = LeadDiscovery(timeout=8, enable_deep_search=deep_search)
-            candidates = discovery.discover(industry, location, keywords, max_results=max_results)
+            candidates, debug, source_used = discover_candidates(industry, location, keywords, max_results, deep_search)
         except Exception as exc:
             loading.empty()
             st.error(f"Discovery failed: {exc}")
@@ -292,15 +319,16 @@ def render_discovery() -> None:
         loading.markdown(loader_html("✅ Mission complete.", "Sorting prospects and preparing save actions."), unsafe_allow_html=True)
         time.sleep(0.35)
         loading.empty()
-        st.session_state["candidates"] = [c.to_dict() for c in candidates]
-        st.session_state["debug"] = discovery.last_debug
+        st.session_state["candidates"] = candidates
+        st.session_state["debug"] = debug
+        st.session_state["source_used"] = source_used
         st.session_state["last_inputs"] = {"industry": industry, "location": location, "keywords": keywords}
 
     candidates = st.session_state.get("candidates", [])
     last_inputs = st.session_state.get("last_inputs", {})
 
     if not candidates:
-        st.info("No prospects shown yet. Search an industry/location to begin. If automatic search is blocked, use the one-click fallback links below.")
+        st.info("No prospects shown yet. Search an industry/location to begin.")
         debug = st.session_state.get("debug", [])
         if debug:
             with st.expander("Search diagnostics", expanded=True):
@@ -313,16 +341,14 @@ def render_discovery() -> None:
                 st.dataframe(pd.DataFrame(links), use_container_width=True, hide_index=True)
         return
 
-    col_a, col_b = st.columns([1, 1])
-    with col_a:
-        if st.button("Clear Previous Discovery Results", key="clear_disc"):
-            st.session_state.pop("candidates", None)
-            st.session_state.pop("debug", None)
-            st.session_state.pop("last_inputs", None)
-            st.rerun()
-    with col_b:
-        st.success(f"Found {len(candidates)} prospect(s).")
+    if st.button("Clear Previous Discovery Results", key="clear_disc"):
+        st.session_state.pop("candidates", None)
+        st.session_state.pop("debug", None)
+        st.session_state.pop("last_inputs", None)
+        st.session_state.pop("source_used", None)
+        st.rerun()
 
+    st.success(f"Found {len(candidates)} prospect(s) from {st.session_state.get('source_used', 'discovery')}.")
     df = pd.DataFrame(candidates)
     st.write("### Business Prospects")
     st.dataframe(df[candidate_columns(df)], use_container_width=True, hide_index=True)
@@ -358,7 +384,7 @@ def render_discovery() -> None:
                         phone=candidate.get("phone") or None,
                         location=candidate.get("location") or None,
                         address=candidate.get("address") or None,
-                        notes=f"Discovered from: {candidate.get('search_query') or ''}",
+                        notes=f"Maps URL: {candidate.get('maps_url') or ''}\nRating: {candidate.get('rating') or ''}\nReviews: {candidate.get('user_ratings_total') or ''}",
                     )
                     audited += 1
                 except Exception:
@@ -371,7 +397,7 @@ def render_discovery() -> None:
                         phone=candidate.get("phone") or None,
                         location=candidate.get("location") or None,
                         address=candidate.get("address") or None,
-                        notes=f"Website found but audit failed. Research query: {candidate.get('search_query') or ''}",
+                        notes=f"Website found but audit failed. Maps URL: {candidate.get('maps_url') or ''}",
                     )
             else:
                 save_prospect(
@@ -383,7 +409,7 @@ def render_discovery() -> None:
                     phone=candidate.get("phone") or None,
                     location=candidate.get("location") or None,
                     address=candidate.get("address") or None,
-                    notes=f"Business prospect without confirmed website. Research query: {candidate.get('search_query') or ''}",
+                    notes=f"Business has no website returned. Maps URL: {candidate.get('maps_url') or ''}\nRating: {candidate.get('rating') or ''}\nReviews: {candidate.get('user_ratings_total') or ''}",
                 )
             saved += 1
         except Exception as exc:
