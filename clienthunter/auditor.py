@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import urllib.robotparser
 from urllib.parse import urljoin, urlparse
@@ -24,6 +25,9 @@ class WebsiteAuditor:
     def __init__(self, timeout: int = 15, user_agent: str = DEFAULT_USER_AGENT):
         self.timeout = timeout
         self.headers = {"User-Agent": user_agent}
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+        self.session.max_redirects = 10
 
     def audit(self, url: str) -> AuditResult:
         normalized_url = normalize_url(url)
@@ -60,9 +64,8 @@ class WebsiteAuditor:
         start = time.perf_counter()
 
         try:
-            response = requests.get(
+            response = self.session.get(
                 normalized_url,
-                headers=self.headers,
                 timeout=self.timeout,
                 allow_redirects=True,
             )
@@ -151,17 +154,20 @@ class WebsiteAuditor:
 
     def _allowed_by_robots(self, base_url: str, target_url: str) -> bool:
         parser = urllib.robotparser.RobotFileParser()
-        parser.set_url(urljoin(base_url, "/robots.txt"))
+        robots_url = urljoin(base_url, "/robots.txt")
         try:
-            parser.read()
+            r = self.session.get(robots_url, timeout=min(8, self.timeout), allow_redirects=True)
+            if r.status_code >= 400 or not r.text.strip():
+                return True
+            parser.parse(r.text.splitlines())
             return parser.can_fetch(self.headers["User-Agent"], target_url)
         except Exception:
             return True
 
     def _check_exists(self, url: str) -> bool:
         try:
-            response = requests.get(url, headers=self.headers, timeout=8, allow_redirects=True)
-            return response.status_code < 400 and bool(response.text.strip())
+            r = self.session.get(url, timeout=8, allow_redirects=True)
+            return r.status_code < 400 and bool(r.text.strip())
         except requests.RequestException:
             return False
 
@@ -181,48 +187,38 @@ class WebsiteAuditor:
 
     def _get_footer_year(self, soup: BeautifulSoup) -> int | None:
         footer_texts = []
-
         for footer in soup.find_all("footer"):
             footer_texts.append(footer.get_text(" ", strip=True))
-
         copyright_candidates = soup.find_all(
             string=lambda text: text and ("©" in text or "copyright" in text.lower())
         )
         footer_texts.extend(str(text) for text in copyright_candidates)
-
         text = " ".join(footer_texts)
         years = extract_years(text)
-
         if not years:
             body_text = soup.get_text(" ", strip=True)
             years = extract_years(body_text[-2000:])
-
         return max(years) if years else None
 
     def _detect_platform(self, html: str, soup: BeautifulSoup, headers: dict) -> str | None:
         lower_html = html.lower()
         generator = soup.find("meta", attrs={"name": "generator"})
-
         if generator and generator.get("content"):
             return generator["content"].strip()
-
         platform_signals = {
             "WordPress": ["wp-content", "wp-includes"],
             "Shopify": ["cdn.shopify.com", "myshopify"],
             "Wix": ["wixstatic", "wix.com"],
             "Squarespace": ["squarespace.com", "static1.squarespace.com"],
             "Drupal": ["drupal-settings-json", "sites/default/files"],
-            "Joomla": ["content=\"joomla", "/media/system/js/"],
-            "Laravel": ["laravel_session", "x-powered-by"],
+            "Joomla": ['content="joomla', "/media/system/js/"],
+            "Laravel": ["laravel_session"],
             "Webflow": ["webflow.js", "webflow.com"],
         }
-
         header_text = " ".join(f"{key}: {value}" for key, value in headers.items()).lower()
-
         for platform, signals in platform_signals.items():
             if any(signal in lower_html or signal in header_text for signal in signals):
                 return platform
-
         return None
 
     def _build_findings(
@@ -244,64 +240,49 @@ class WebsiteAuditor:
     ) -> tuple[list[str], list[str]]:
         issues = []
         recommendations = []
-
         if status_code >= 400:
             issues.append(f"Homepage returns HTTP {status_code}")
             recommendations.append("Fix homepage availability and server response issues.")
-
         if elapsed_ms > 3000:
             issues.append(f"Homepage is slow to respond: {elapsed_ms}ms")
             recommendations.append("Improve hosting, caching, image optimization, and frontend asset loading.")
-
         if page_size_kb > 2500:
             issues.append(f"Homepage is heavy: {page_size_kb}KB")
             recommendations.append("Compress images and reduce unused scripts/styles.")
-
         if not https_enabled:
             issues.append("Website is not using HTTPS")
             recommendations.append("Install SSL and redirect all traffic to HTTPS.")
-
         if not title:
             issues.append("Missing page title")
             recommendations.append("Add a strong SEO title that explains the business clearly.")
-
         if not meta_description:
             issues.append("Missing meta description")
             recommendations.append("Add a persuasive meta description for search and social previews.")
-
         if not has_viewport:
             issues.append("Missing mobile viewport tag")
             recommendations.append("Improve mobile responsiveness and add proper viewport configuration.")
-
         if not has_canonical:
             issues.append("Missing canonical link")
             recommendations.append("Add canonical URLs to reduce SEO duplication issues.")
-
         if not has_open_graph:
             issues.append("Missing Open Graph social sharing tags")
             recommendations.append("Add Open Graph metadata for better previews on Facebook, LinkedIn, and WhatsApp.")
-
         if not has_schema:
             issues.append("Missing structured data/schema markup")
             recommendations.append("Add business/schema markup to improve search understanding.")
-
         if not has_sitemap:
             issues.append("Missing sitemap.xml")
             recommendations.append("Create and submit sitemap.xml to improve indexing.")
-
         if not has_robots:
             issues.append("Missing robots.txt")
             recommendations.append("Add a robots.txt file with sitemap reference.")
-
         if stale_footer:
             issues.append(f"Footer copyright year appears outdated: {footer_year}")
             recommendations.append("Update footer, content, design, and maintenance workflow.")
-
         if not issues:
             recommendations.append(
                 "Website has strong basic signals. Look for deeper UX, conversion, and business automation opportunities."
             )
-
         return issues, recommendations
 
     def _score_opportunity(self, issues: list[str]) -> int:
@@ -322,11 +303,8 @@ class WebsiteAuditor:
             "http": 10,
             "could not load": 20,
         }
-
         text = " ".join(issues).lower()
-
         for keyword, weight in issue_weights.items():
-            if keyword in text:
+            if re.search(r"\b" + re.escape(keyword) + r"\b", text):
                 score += weight
-
         return max(0, min(100, score))
