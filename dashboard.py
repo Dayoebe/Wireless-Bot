@@ -15,6 +15,7 @@ from clienthunter.database import (
     save_lead,
     update_lead_status,
 )
+from clienthunter.discovery import LeadDiscovery
 from clienthunter.outreach import build_outreach
 
 
@@ -139,7 +140,7 @@ def filter_leads(df: pd.DataFrame) -> pd.DataFrame:
         ]
         mask = pd.Series(False, index=filtered.index)
         for column in searchable_columns:
-            mask = mask | filtered[column].fillna("").astype(str).str.lower().str.contains(text)
+            mask = mask | filtered[column].fillna("").astype(str).str.lower().str.contains(text, regex=False)
         filtered = filtered[mask]
 
     return filtered
@@ -167,7 +168,7 @@ def render_header() -> None:
         """
         <div class="wireless-hero">
             <h1>📡 Wireless Bot</h1>
-            <p>A local prospecting dashboard for auditing business websites, scoring opportunities, tracking leads, and generating outreach that can win clients.</p>
+            <p>A local prospecting dashboard for discovering business websites, auditing opportunities, tracking leads, and generating outreach that can win clients.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -191,7 +192,7 @@ def render_overview(leads: list[dict[str, Any]], filtered_df: pd.DataFrame) -> N
     st.divider()
 
     if filtered_df.empty:
-        st.info("No leads match the current filter. Scan a website or import a CSV to begin.")
+        st.info("No leads match the current filter. Discover leads, scan a website, or import a CSV to begin.")
         return
 
     chart_col, table_col = st.columns([1, 2])
@@ -217,9 +218,101 @@ def render_overview(leads: list[dict[str, Any]], filtered_df: pd.DataFrame) -> N
     )
 
 
+def render_discover_leads() -> None:
+    st.subheader("Discover Leads Automatically")
+    st.caption("Enter an industry and location. Wireless Bot will find likely business websites, then you can audit and save them as leads.")
+
+    with st.form("discover_leads_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            industry = st.text_input("Industry", placeholder="Hotel, clinic, school, real estate, logistics...")
+            location = st.text_input("Location", placeholder="Akure, Lagos, Abuja, Ibadan...")
+        with col2:
+            keywords = st.text_input("Extra keywords", placeholder="booking, appointment, services, contact...")
+            max_results = st.slider("Maximum candidates", 3, 25, 10)
+
+        submitted = st.form_submit_button("Find Candidate Websites", type="primary")
+
+    if submitted:
+        if not industry.strip():
+            st.error("Please enter an industry first.")
+            return
+
+        with st.spinner("Searching for candidate business websites..."):
+            try:
+                candidates = LeadDiscovery().discover(
+                    industry=industry,
+                    location=location,
+                    keywords=keywords,
+                    max_results=max_results,
+                )
+            except Exception as exc:
+                st.error(f"Discovery failed: {exc}")
+                return
+
+        st.session_state["discovered_candidates"] = [candidate.to_dict() for candidate in candidates]
+
+    candidates = st.session_state.get("discovered_candidates", [])
+
+    if not candidates:
+        st.info("No candidates yet. Search with an industry and location to begin.")
+        return
+
+    candidates_df = pd.DataFrame(candidates)
+    st.write("### Candidate Websites")
+    st.dataframe(
+        candidates_df[["business_name", "website", "industry", "location", "search_query", "snippet"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.caption("Review the candidates before saving. Search results can include false positives, so always verify important leads manually before outreach.")
+
+    if not st.button("Audit and Save These Candidates", type="primary"):
+        return
+
+    auditor = WebsiteAuditor()
+    saved = 0
+    skipped = 0
+    progress = st.progress(0)
+    status_box = st.empty()
+
+    for index, candidate in enumerate(candidates, start=1):
+        website = candidate.get("website")
+
+        if not website:
+            skipped += 1
+            progress.progress(index / len(candidates))
+            continue
+
+        status_box.write(f"Auditing {website}...")
+
+        try:
+            audit = auditor.audit(website)
+            save_lead(
+                audit,
+                business_name=candidate.get("business_name") or None,
+                industry=candidate.get("industry") or None,
+                source=candidate.get("source") or "Web Discovery",
+                location=candidate.get("location") or None,
+                status="new",
+                notes=f"Discovered from query: {candidate.get('search_query') or ''}",
+            )
+            saved += 1
+        except Exception as exc:
+            skipped += 1
+            st.warning(f"Skipped {website}: {exc}")
+
+        progress.progress(index / len(candidates))
+
+    clear_lead_cache()
+    status_box.empty()
+    st.success(f"Discovery import complete. Saved {saved} lead(s), skipped {skipped}.")
+
+
 def render_scan_form() -> None:
-    st.subheader("Scan and Save a New Lead")
-    st.caption("Enter a business website and Wireless Bot will audit it, score it, and save it to your local SQLite database.")
+    st.subheader("Manual Scan and Save")
+    st.caption("Use this when you already have a website URL. For less manual work, use Discover Leads first.")
 
     with st.form("scan_lead_form"):
         col1, col2 = st.columns(2)
@@ -292,7 +385,7 @@ def render_manage_leads(leads: list[dict[str, Any]]) -> None:
 
     selected_lead = selected_lead_from_sidebar(leads)
     if selected_lead is None:
-        st.info("No leads yet. Scan or import leads first.")
+        st.info("No leads yet. Discover, scan, or import leads first.")
         return
 
     st.markdown(f"**Business:** {selected_lead.get('business_name') or '-'}")
@@ -326,10 +419,10 @@ def render_outreach(leads: list[dict[str, Any]]) -> None:
 
     selected_lead = selected_lead_from_sidebar(leads)
     if selected_lead is None:
-        st.info("No leads yet. Scan or import leads first.")
+        st.info("No leads yet. Discover, scan, or import leads first.")
         return
 
-    outreach = build_outreach(selected_lead)  # sqlite rows and dictionaries both support key lookup here.
+    outreach = build_outreach(selected_lead)
 
     st.write("Use these as a starting point. Personalize before sending.")
 
@@ -423,12 +516,15 @@ def main() -> None:
 
     filtered_df = filter_leads(df)
 
-    overview_tab, scan_tab, manage_tab, outreach_tab, import_tab = st.tabs(
-        ["Overview", "Scan Lead", "Manage Status", "Outreach", "Bulk Import"]
+    overview_tab, discover_tab, scan_tab, manage_tab, outreach_tab, import_tab = st.tabs(
+        ["Overview", "Discover Leads", "Manual Scan", "Manage Status", "Outreach", "Bulk Import"]
     )
 
     with overview_tab:
         render_overview(leads, filtered_df)
+
+    with discover_tab:
+        render_discover_leads()
 
     with scan_tab:
         render_scan_form()
