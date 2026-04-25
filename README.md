@@ -2,7 +2,7 @@
 
 Wireless Bot is a local prospecting assistant for finding businesses that may need a new website, a redesign, SEO improvement, or stronger digital presence.
 
-It audits a website, scores the opportunity, stores the lead, tracks follow-up status, and generates practical outreach messages you can send by email, LinkedIn, WhatsApp, or proposal.
+It can discover possible business websites from an industry/location search, audit each website, score the opportunity, store the lead, track follow-up status, and generate practical outreach messages you can send by email, LinkedIn, WhatsApp, or proposal.
 
 Built for Debian/Linux, Python, SQLite, Streamlit, and public GitHub use.
 
@@ -10,6 +10,7 @@ Built for Debian/Linux, Python, SQLite, Streamlit, and public GitHub use.
 
 ## What it can do
 
+- Discover likely business websites from industry, location, and optional keywords
 - Audit a business website URL
 - Detect stale footer years, for example `© 2021`
 - Check basic SEO signals
@@ -24,7 +25,7 @@ Built for Debian/Linux, Python, SQLite, Streamlit, and public GitHub use.
 - Generate outreach messages
 - Export leads to CSV
 - Bulk scan leads from a CSV file
-- Use a Streamlit GUI dashboard for scanning, tracking, outreach, importing, and exporting
+- Use a Streamlit GUI dashboard for discovery, scanning, tracking, outreach, importing, and exporting
 
 ---
 
@@ -62,14 +63,15 @@ python -m clienthunter.cli initdb
 ## Launch the GUI dashboard
 
 ```bash
-streamlit run dashboard.py
+python -m streamlit run dashboard.py
 ```
 
 The dashboard gives you:
 
 - Lead overview metrics
+- Lead discovery by industry/location
 - Lead filtering by status, score, and keyword
-- Website scan form
+- Manual website scan form
 - Lead status management
 - Outreach generator
 - Bulk CSV import and scan
@@ -77,9 +79,45 @@ The dashboard gives you:
 
 ---
 
+## Discover leads without manually entering websites
+
+Use the dashboard tab:
+
+```text
+Discover Leads
+```
+
+Enter:
+
+```text
+Industry: Hotel
+Location: Akure
+Extra keywords: booking contact
+```
+
+Wireless Bot will search for candidate business websites. You can review the candidates, then click:
+
+```text
+Audit and Save These Candidates
+```
+
+---
+
 ## Quick CLI use
 
-Audit one website:
+Discover possible websites:
+
+```bash
+python -m clienthunter.cli discover "Hotel" --location "Akure" --keywords "booking contact" --limit 10
+```
+
+Discover, audit, and save leads automatically:
+
+```bash
+python -m clienthunter.cli discover "Hotel" --location "Akure" --keywords "booking contact" --limit 10 --save
+```
+
+Audit one website manually:
 
 ```bash
 python -m clienthunter.cli scan https://example.com --business-name "Example Business" --industry "Hotel"
@@ -154,6 +192,7 @@ Wireless-Bot/
 │   ├── auditor.py
 │   ├── cli.py
 │   ├── database.py
+│   ├── discovery.py
 │   ├── exporter.py
 │   ├── models.py
 │   ├── outreach.py
@@ -164,13 +203,22 @@ Wireless-Bot/
 │   └── prospecting-playbook.md
 ├── exports/
 ├── tests/
-│   └── test_database_flow.py
+│   ├── test_database_flow.py
+│   └── test_discovery.py
 ├── dashboard.py
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
 └── README.md
 ```
+
+---
+
+## Current discovery limitation
+
+The discovery feature uses public web search result pages and filters likely business websites. Results may include false positives, directories, old pages, or irrelevant websites. Always review important leads before outreach.
+
+For a stronger production version, connect a proper search API later.
 
 ---
 
