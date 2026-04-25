@@ -153,8 +153,6 @@ class LeadDiscovery:
         if candidates:
             return candidates[:max_results]
 
-        # If direct websites are scarce, return directory-like candidates instead of showing a blank page.
-        # These should be reviewed manually before outreach.
         deduped_fallbacks: list[LeadCandidate] = []
         fallback_seen: set[str] = set()
         for candidate in fallback_candidates:
@@ -172,7 +170,9 @@ class LeadDiscovery:
 
         for searcher in (self._search_duckduckgo_html, self._search_duckduckgo_lite, self._search_bing):
             try:
-                results.extend(searcher(query))
+                searcher_results = searcher(query)
+                self.last_debug.append(f"{searcher.__name__}: {len(searcher_results)} result(s)")
+                results.extend(searcher_results)
             except requests.RequestException as exc:
                 self.last_debug.append(f"{searcher.__name__} failed: {exc}")
             except Exception as exc:
@@ -223,10 +223,42 @@ def build_search_queries(industry: str, location: str = "", keywords: str = "") 
                 f"{industry} in {location} official website",
                 f"{industry} companies in {location} website",
                 f"{industry} {location} contact",
+                f"{industry} {location} site:.com",
+                f"{industry} {location} site:.com.ng",
             ]
         )
 
     return dedupe_texts(queries)
+
+
+def build_manual_search_links(industry: str, location: str = "", keywords: str = "") -> list[dict[str, str]]:
+    """Build one-click search links when automatic scraping returns no candidates."""
+    queries = build_search_queries(industry, location, keywords)[:5]
+    links: list[dict[str, str]] = []
+
+    for query in queries:
+        encoded = quote_plus(query)
+        links.extend(
+            [
+                {
+                    "source": "Google",
+                    "query": query,
+                    "url": f"https://www.google.com/search?q={encoded}",
+                },
+                {
+                    "source": "Bing",
+                    "query": query,
+                    "url": f"https://www.bing.com/search?q={encoded}",
+                },
+                {
+                    "source": "DuckDuckGo",
+                    "query": query,
+                    "url": f"https://duckduckgo.com/?q={encoded}",
+                },
+            ]
+        )
+
+    return links
 
 
 def parse_duckduckgo_results(html: str) -> list[dict[str, str]]:
