@@ -14,7 +14,7 @@ from .utils import normalize_url, truncate
 
 DEFAULT_DISCOVERY_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 WirelessBot/0.3"
+    "(KHTML, like Gecko) Chrome/122.0 Safari/537.36 WirelessBot/0.4"
 )
 
 OVERPASS_ENDPOINTS = (
@@ -77,7 +77,7 @@ INDUSTRY_OSM_TAGS: dict[str, list[tuple[str, str]]] = {
     "college": [("amenity", "college"), ("amenity", "school")],
     "clinic": [("amenity", "clinic"), ("amenity", "doctors"), ("healthcare", "clinic")],
     "hospital": [("amenity", "hospital"), ("healthcare", "hospital")],
-    "hotel": [("tourism", "hotel"), ("tourism", "guest_house")],
+    "hotel": [("tourism", "hotel"), ("tourism", "guest_house"), ("tourism", "motel")],
     "restaurant": [("amenity", "restaurant"), ("amenity", "fast_food")],
     "real estate": [("office", "estate_agent")],
     "bank": [("amenity", "bank")],
@@ -96,13 +96,17 @@ class LeadCandidate:
     search_query: str
     title: str
     snippet: str
+    phone: str = ""
+    email: str = ""
+    address: str = ""
+    confidence: str = "research"
 
     def to_dict(self) -> dict[str, str]:
         return asdict(self)
 
 
 class LeadDiscovery:
-    """Discover likely business websites or research prospects from industry/location terms."""
+    """Discover business prospects from map data and search results."""
 
     def __init__(
         self,
@@ -138,23 +142,21 @@ class LeadDiscovery:
             raise ValueError("Industry is required for lead discovery.")
 
         candidates: list[LeadCandidate] = []
-        research_only: list[LeadCandidate] = []
         directory_fallbacks: list[LeadCandidate] = []
         seen_keys: set[str] = set()
 
-        for candidate in self._discover_from_openstreetmap(industry, location, keywords):
-            key = candidate_key(candidate)
-            if key in seen_keys:
-                continue
-            seen_keys.add(key)
-
-            if candidate.website:
+        for source_candidates in (
+            self._discover_from_openstreetmap(industry, location, keywords),
+            self._discover_from_nominatim(industry, location, keywords),
+        ):
+            for candidate in source_candidates:
+                key = candidate_key(candidate)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
                 candidates.append(candidate)
-            else:
-                research_only.append(candidate)
-
-            if len(candidates) >= max_results:
-                return candidates
+                if len(candidates) >= max_results:
+                    return candidates
 
         search_queries = build_search_queries(industry, location, keywords)
         if not self.enable_deep_search:
@@ -185,6 +187,7 @@ class LeadDiscovery:
                     search_query=query,
                     title=title,
                     snippet=truncate(snippet, 240),
+                    confidence="website",
                 )
 
                 key = candidate_key(candidate)
@@ -199,8 +202,16 @@ class LeadDiscovery:
                 elif is_soft_directory_url(website):
                     directory_fallbacks.append(candidate)
 
-        combined = candidates + research_only + directory_fallbacks
-        return combined[:max_results]
+        for candidate in directory_fallbacks:
+            key = candidate_key(candidate)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            candidates.append(candidate)
+            if len(candidates) >= max_results:
+                break
+
+        return candidates[:max_results]
 
     def _discover_from_openstreetmap(
         self,
@@ -233,28 +244,63 @@ class LeadDiscovery:
 
         elements = payload.get("elements", [])
         self.last_debug.append(f"OpenStreetMap: {len(elements)} mapped {industry} result(s) around {location}")
+        return [
+            candidate
+            for element in elements
+            if (candidate := self._candidate_from_osm_element(element, industry, location, keywords))
+        ]
 
+    def _discover_from_nominatim(
+        self,
+        industry: str,
+        location: str,
+        keywords: str,
+    ) -> list[LeadCandidate]:
+        if not location:
+            return []
+
+        query = clean_text(f"{industry} {location} Nigeria")
+        try:
+            response = self.session.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": query,
+                    "format": "jsonv2",
+                    "limit": 50,
+                    "addressdetails": 1,
+                    "extratags": 1,
+                    "namedetails": 1,
+                },
+                timeout=self.timeout + 5,
+            )
+            response.raise_for_status()
+            results = response.json()
+        except Exception as exc:
+            self.last_debug.append(f"Nominatim business search failed: {exc}")
+            return []
+
+        self.last_debug.append(f"Nominatim: {len(results)} mapped prospect result(s) for {query!r}")
         candidates: list[LeadCandidate] = []
-        for element in elements:
-            tags_data = element.get("tags", {})
-            name = clean_text(tags_data.get("name"))
+        for item in results:
+            name = clean_text(
+                item.get("name")
+                or item.get("namedetails", {}).get("name")
+                or first_display_name_part(item.get("display_name", ""))
+            )
             if not name:
                 continue
 
-            website = first_non_empty(
-                tags_data.get("website"),
-                tags_data.get("contact:website"),
-                tags_data.get("url"),
-            )
-            website = normalize_result_url(website) if website else ""
-            phone = first_non_empty(tags_data.get("phone"), tags_data.get("contact:phone"))
-            email = first_non_empty(tags_data.get("email"), tags_data.get("contact:email"))
-            address = format_osm_address(tags_data)
+            extra = item.get("extratags", {}) or {}
+            website = normalize_result_url(first_non_empty(extra.get("website"), extra.get("contact:website"), extra.get("url")))
+            phone = first_non_empty(extra.get("phone"), extra.get("contact:phone"))
+            email = first_non_empty(extra.get("email"), extra.get("contact:email"))
+            address = clean_text(item.get("display_name"))
             manual_query = build_business_research_query(name, industry, location, keywords)
+            confidence = "website" if website else "mapped-business"
 
             snippet_parts = [part for part in [address, phone, email] if part]
             if not website:
-                snippet_parts.append("Research prospect: no website listed on map data yet.")
+                snippet_parts.append("Mapped business prospect. Website not confirmed yet.")
 
             candidates.append(
                 LeadCandidate(
@@ -262,14 +308,60 @@ class LeadDiscovery:
                     website=website,
                     industry=industry,
                     location=location,
-                    source="OpenStreetMap",
+                    source="OpenStreetMap/Nominatim",
                     search_query=manual_query,
                     title=name,
                     snippet=truncate(" | ".join(snippet_parts), 240),
+                    phone=phone,
+                    email=email,
+                    address=address,
+                    confidence=confidence,
                 )
             )
-
         return candidates
+
+    def _candidate_from_osm_element(
+        self,
+        element: dict,
+        industry: str,
+        location: str,
+        keywords: str,
+    ) -> LeadCandidate | None:
+        tags_data = element.get("tags", {})
+        name = clean_text(tags_data.get("name"))
+        if not name:
+            return None
+
+        website = first_non_empty(
+            tags_data.get("website"),
+            tags_data.get("contact:website"),
+            tags_data.get("url"),
+        )
+        website = normalize_result_url(website) if website else ""
+        phone = first_non_empty(tags_data.get("phone"), tags_data.get("contact:phone"))
+        email = first_non_empty(tags_data.get("email"), tags_data.get("contact:email"))
+        address = format_osm_address(tags_data)
+        manual_query = build_business_research_query(name, industry, location, keywords)
+        confidence = "website" if website else "mapped-business"
+
+        snippet_parts = [part for part in [address, phone, email] if part]
+        if not website:
+            snippet_parts.append("Mapped business prospect. Website not confirmed yet.")
+
+        return LeadCandidate(
+            business_name=name,
+            website=website,
+            industry=industry,
+            location=location,
+            source="OpenStreetMap",
+            search_query=manual_query,
+            title=name,
+            snippet=truncate(" | ".join(snippet_parts), 240),
+            phone=phone,
+            email=email,
+            address=address,
+            confidence=confidence,
+        )
 
     def _fetch_overpass(self, query: str) -> dict | None:
         for endpoint in OVERPASS_ENDPOINTS:
@@ -403,7 +495,10 @@ def build_business_research_query(name: str, industry: str, location: str, keywo
 
 
 def candidate_key(candidate: LeadCandidate) -> str:
-    return normalized_domain(candidate.website) or candidate.business_name.lower()
+    if candidate.website:
+        return normalized_domain(candidate.website)
+    key_parts = [candidate.business_name, candidate.address, candidate.phone, candidate.email]
+    return "|".join(part.lower() for part in key_parts if part)
 
 
 def osm_tags_for_industry(industry: str) -> list[tuple[str, str]]:
@@ -646,6 +741,10 @@ def format_osm_address(tags_data: dict[str, str]) -> str:
         tags_data.get("addr:state"),
     ]
     return clean_text(", ".join(part for part in parts if part))
+
+
+def first_display_name_part(display_name: str) -> str:
+    return clean_text(display_name.split(",")[0])
 
 
 def first_non_empty(*values: str | None) -> str:
