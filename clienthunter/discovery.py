@@ -65,6 +65,19 @@ IGNORED_EXTENSIONS = (
     ".webp",
 )
 
+INDUSTRY_OSM_TAGS: dict[str, list[tuple[str, str]]] = {
+    "school": [("amenity", "school")],
+    "schools": [("amenity", "school")],
+    "clinic": [("amenity", "clinic"), ("amenity", "doctors"), ("healthcare", "clinic")],
+    "hospital": [("amenity", "hospital"), ("healthcare", "hospital")],
+    "hotel": [("tourism", "hotel"), ("tourism", "guest_house")],
+    "restaurant": [("amenity", "restaurant"), ("amenity", "fast_food")],
+    "real estate": [("office", "estate_agent")],
+    "bank": [("amenity", "bank")],
+    "pharmacy": [("amenity", "pharmacy"), ("healthcare", "pharmacy")],
+    "church": [("amenity", "place_of_worship")],
+}
+
 
 @dataclass(frozen=True)
 class LeadCandidate:
@@ -112,8 +125,22 @@ class LeadDiscovery:
             raise ValueError("Industry is required for lead discovery.")
 
         candidates: list[LeadCandidate] = []
-        fallback_candidates: list[LeadCandidate] = []
         seen_domains: set[str] = set()
+        seen_names: set[str] = set()
+
+        for candidate in self._discover_from_openstreetmap(industry, location, keywords):
+            key = normalized_domain(candidate.website) or candidate.business_name.lower()
+            if key in seen_domains or candidate.business_name.lower() in seen_names:
+                continue
+
+            seen_domains.add(key)
+            seen_names.add(candidate.business_name.lower())
+            candidates.append(candidate)
+
+            if len(candidates) >= max_results:
+                return candidates
+
+        fallback_candidates: list[LeadCandidate] = []
 
         for query in build_search_queries(industry, location, keywords):
             search_results = self._search_all(query)
@@ -164,6 +191,110 @@ class LeadDiscovery:
                 break
 
         return deduped_fallbacks
+
+    def _discover_from_openstreetmap(
+        self,
+        industry: str,
+        location: str,
+        keywords: str,
+    ) -> list[LeadCandidate]:
+        if not location:
+            self.last_debug.append("OpenStreetMap skipped: location is required")
+            return []
+
+        try:
+            area_id = self._resolve_osm_area_id(location)
+        except Exception as exc:
+            self.last_debug.append(f"OpenStreetMap area lookup failed: {exc}")
+            return []
+
+        if area_id is None:
+            self.last_debug.append(f"OpenStreetMap area lookup returned no area for {location!r}")
+            return []
+
+        tags = osm_tags_for_industry(industry)
+        if not tags:
+            self.last_debug.append(f"OpenStreetMap skipped: no OSM tag mapping for {industry!r}")
+            return []
+
+        query = build_overpass_query(area_id, tags)
+
+        try:
+            response = self.session.post(
+                "https://overpass-api.de/api/interpreter",
+                data={"data": query},
+                timeout=self.timeout + 20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            self.last_debug.append(f"OpenStreetMap Overpass lookup failed: {exc}")
+            return []
+
+        elements = payload.get("elements", [])
+        self.last_debug.append(f"OpenStreetMap: {len(elements)} mapped {industry} result(s) around {location}")
+
+        candidates: list[LeadCandidate] = []
+        for element in elements:
+            tags_data = element.get("tags", {})
+            name = clean_text(tags_data.get("name"))
+            if not name:
+                continue
+
+            website = first_non_empty(
+                tags_data.get("website"),
+                tags_data.get("contact:website"),
+                tags_data.get("url"),
+            )
+            website = normalize_result_url(website) if website else ""
+            phone = first_non_empty(tags_data.get("phone"), tags_data.get("contact:phone"))
+            email = first_non_empty(tags_data.get("email"), tags_data.get("contact:email"))
+            address = format_osm_address(tags_data)
+            manual_query = build_business_research_query(name, industry, location, keywords)
+
+            snippet_parts = [part for part in [address, phone, email] if part]
+            if not website:
+                snippet_parts.append("No website listed in OpenStreetMap; use research links before outreach.")
+
+            candidates.append(
+                LeadCandidate(
+                    business_name=name,
+                    website=website,
+                    industry=industry,
+                    location=location,
+                    source="OpenStreetMap",
+                    search_query=manual_query,
+                    title=name,
+                    snippet=truncate(" | ".join(snippet_parts), 240),
+                )
+            )
+
+        return candidates
+
+    def _resolve_osm_area_id(self, location: str) -> int | None:
+        query = f"{location}, Nigeria"
+        response = self.session.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": query, "format": "jsonv2", "limit": 1},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        results = response.json()
+
+        if not results:
+            return None
+
+        osm_type = results[0].get("osm_type")
+        osm_id = int(results[0].get("osm_id"))
+
+        if osm_type == "relation":
+            return 3600000000 + osm_id
+        if osm_type == "way":
+            return 2400000000 + osm_id
+        if osm_type == "node":
+            return 3600000000 + osm_id
+
+        return None
 
     def _search_all(self, query: str) -> list[dict[str, str]]:
         results: list[dict[str, str]] = []
@@ -240,25 +371,65 @@ def build_manual_search_links(industry: str, location: str = "", keywords: str =
         encoded = quote_plus(query)
         links.extend(
             [
-                {
-                    "source": "Google",
-                    "query": query,
-                    "url": f"https://www.google.com/search?q={encoded}",
-                },
-                {
-                    "source": "Bing",
-                    "query": query,
-                    "url": f"https://www.bing.com/search?q={encoded}",
-                },
-                {
-                    "source": "DuckDuckGo",
-                    "query": query,
-                    "url": f"https://duckduckgo.com/?q={encoded}",
-                },
+                {"source": "Google", "query": query, "url": f"https://www.google.com/search?q={encoded}"},
+                {"source": "Bing", "query": query, "url": f"https://www.bing.com/search?q={encoded}"},
+                {"source": "DuckDuckGo", "query": query, "url": f"https://duckduckgo.com/?q={encoded}"},
             ]
         )
 
     return links
+
+
+def build_business_research_links(candidate: LeadCandidate) -> list[dict[str, str]]:
+    query = build_business_research_query(
+        candidate.business_name,
+        candidate.industry,
+        candidate.location,
+        "website contact",
+    )
+    encoded = quote_plus(query)
+    return [
+        {"source": "Google", "query": query, "url": f"https://www.google.com/search?q={encoded}"},
+        {"source": "Bing", "query": query, "url": f"https://www.bing.com/search?q={encoded}"},
+        {"source": "DuckDuckGo", "query": query, "url": f"https://duckduckgo.com/?q={encoded}"},
+    ]
+
+
+def build_business_research_query(name: str, industry: str, location: str, keywords: str = "") -> str:
+    return clean_text(f"{name} {industry} {location} {keywords} official website contact")
+
+
+def osm_tags_for_industry(industry: str) -> list[tuple[str, str]]:
+    key = clean_text(industry).lower()
+    if key in INDUSTRY_OSM_TAGS:
+        return INDUSTRY_OSM_TAGS[key]
+
+    for known_key, tags in INDUSTRY_OSM_TAGS.items():
+        if known_key in key or key in known_key:
+            return tags
+
+    return []
+
+
+def build_overpass_query(area_id: int, tags: list[tuple[str, str]]) -> str:
+    clauses = []
+    for key, value in tags:
+        clauses.extend(
+            [
+                f'node["{key}"="{value}"](area.searchArea);',
+                f'way["{key}"="{value}"](area.searchArea);',
+                f'relation["{key}"="{value}"](area.searchArea);',
+            ]
+        )
+
+    return f"""
+    [out:json][timeout:25];
+    area({area_id})->.searchArea;
+    (
+      {''.join(clauses)}
+    );
+    out center tags 50;
+    """
 
 
 def parse_duckduckgo_results(html: str) -> list[dict[str, str]]:
@@ -412,21 +583,33 @@ def infer_business_name(title: str, domain: str) -> str:
 
 
 def remove_common_title_noise(value: str) -> str:
-    noise_words = (
-        "official website",
-        "home page",
-        "homepage",
-        "welcome to",
-        "best",
-        "contact us",
-    )
-
+    noise_words = ("official website", "home page", "homepage", "welcome to", "best", "contact us")
     cleaned = value.strip()
 
     for noise in noise_words:
         cleaned = re.sub(rf"\b{re.escape(noise)}\b", "", cleaned, flags=re.IGNORECASE)
 
     return clean_text(cleaned)
+
+
+def format_osm_address(tags_data: dict[str, str]) -> str:
+    parts = [
+        tags_data.get("addr:housenumber"),
+        tags_data.get("addr:street"),
+        tags_data.get("addr:suburb"),
+        tags_data.get("addr:city"),
+        tags_data.get("addr:state"),
+    ]
+    return clean_text(", ".join(part for part in parts if part)
+    )
+
+
+def first_non_empty(*values: str | None) -> str:
+    for value in values:
+        cleaned = clean_text(value)
+        if cleaned:
+            return cleaned
+    return ""
 
 
 def clean_text(value: str | None) -> str:
