@@ -254,11 +254,18 @@ def candidate_columns(df: pd.DataFrame) -> list[str]:
     return [col for col in wanted if col in df.columns]
 
 
-def discover_candidates(industry: str, location: str, keywords: str, max_results: int, deep_search: bool) -> tuple[list[dict[str, Any]], list[str], str]:
+def resolve_places_key(ui_key: str = "") -> str:
+    key = (ui_key or "").strip()
+    if key:
+        return key
+    return st.secrets.get("GOOGLE_PLACES_API_KEY", "") if hasattr(st, "secrets") else ""
+
+
+def discover_candidates(industry: str, location: str, keywords: str, max_results: int, deep_search: bool, api_key: str = "") -> tuple[list[dict[str, Any]], list[str], str]:
     debug: list[str] = []
     source_used = "Google Places"
 
-    places = GooglePlacesDiscovery(timeout=15)
+    places = GooglePlacesDiscovery(api_key=api_key or None, timeout=15)
     if places.is_configured:
         place_results = places.discover(industry, location, keywords, max_results=max_results)
         debug.extend(places.last_debug)
@@ -266,7 +273,7 @@ def discover_candidates(industry: str, location: str, keywords: str, max_results
             return [candidate.to_dict() for candidate in place_results], debug, source_used
         debug.append("Google Places returned no results, so Wireless Bot tried free fallback sources.")
     else:
-        debug.append("Google Places is not configured. Add GOOGLE_PLACES_API_KEY to get real business results.")
+        debug.append("Google Places is not configured. Enter your API key in the dashboard or add GOOGLE_PLACES_API_KEY to .env.")
 
     source_used = "Free fallback sources"
     fallback = LeadDiscovery(timeout=8, enable_deep_search=deep_search)
@@ -275,21 +282,35 @@ def discover_candidates(industry: str, location: str, keywords: str, max_results
     return [candidate.to_dict() for candidate in fallback_results], debug, source_used
 
 
-def render_google_places_notice() -> None:
-    places = GooglePlacesDiscovery()
+def render_google_places_notice(ui_key: str = "") -> None:
+    places = GooglePlacesDiscovery(api_key=ui_key or None)
     if places.is_configured:
-        st.success("Google Places is configured. Searches will use real Google Maps business data first.")
+        st.success("Google Places key detected. Searches will use real Google Maps business data first.")
     else:
         st.warning(
-            "Google Places is not configured yet. Free fallback search can be noisy. "
-            "For real prospecting results, add GOOGLE_PLACES_API_KEY to your .env file."
+            "Google Places key is not detected yet. Free fallback search can be noisy. "
+            "Paste your key below or add GOOGLE_PLACES_API_KEY to your .env file."
         )
 
 
 def render_discovery() -> None:
     st.subheader("Discover Business Prospects")
     st.caption("Use Google Places for real businesses: name, address, phone, website, rating, and Google Maps link where available.")
-    render_google_places_notice()
+
+    with st.expander("Google Places API key", expanded=False):
+        ui_api_key = st.text_input(
+            "Paste API key for this session",
+            type="password",
+            value=st.session_state.get("google_places_api_key", ""),
+            help="For safety, use this only temporarily. Better: put GOOGLE_PLACES_API_KEY in .env.",
+            key="places_api_key_input",
+        )
+        if ui_api_key:
+            st.session_state["google_places_api_key"] = ui_api_key.strip()
+        st.caption("If the key gives REQUEST_DENIED, enable Places API (New), enable billing, and restrict the key safely in Google Cloud Console.")
+
+    active_key = st.session_state.get("google_places_api_key", "")
+    render_google_places_notice(active_key)
 
     with st.form("discover_form"):
         col1, col2 = st.columns(2)
@@ -311,7 +332,14 @@ def render_discovery() -> None:
             loading.markdown(loader_html(title, subtitle), unsafe_allow_html=True)
             time.sleep(0.35)
         try:
-            candidates, debug, source_used = discover_candidates(industry, location, keywords, max_results, deep_search)
+            candidates, debug, source_used = discover_candidates(
+                industry,
+                location,
+                keywords,
+                max_results,
+                deep_search,
+                api_key=active_key,
+            )
         except Exception as exc:
             loading.empty()
             st.error(f"Discovery failed: {exc}")
